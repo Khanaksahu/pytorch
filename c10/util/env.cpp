@@ -9,9 +9,9 @@
 
 namespace c10::utils {
 
-static std::shared_mutex& get_env_mutex() {
-  static std::shared_mutex env_mutex;
-  return env_mutex;
+std::shared_mutex& get_env_mutex() {
+  static std::shared_mutex* env_mutex = new std::shared_mutex();
+  return *env_mutex;
 }
 
 // Set an environment variable.
