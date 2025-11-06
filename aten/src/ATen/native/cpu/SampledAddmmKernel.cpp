@@ -85,7 +85,7 @@ void sampled_addmm_sparse_csr_kernel(
     const Scalar& alpha,
     const Tensor& result) {
   const auto index_type = result.crow_indices().scalar_type();
-  AT_DISPATCH_FLOATING_AND_COMPLEX_TYPES(mat1.scalar_type(), "sampled_addmm_sparse_csr_kernel", [&]() {
+  AT_DISPATCH_FLOATING_AND_COMPLEX_TYPES_AND2(kHalf, kBFloat16, mat1.scalar_type(), "sampled_addmm_sparse_csr_kernel", [&]() {
     AT_DISPATCH_INDEX_TYPES(index_type, "sampled_addmm_sparse_csr_index", [&]() {
       sampled_addmm_sparse_csr_kernel_impl<scalar_t, index_t>(mat1, mat2, beta, alpha, result);
     });
