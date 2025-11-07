@@ -2,7 +2,7 @@ r"""
 This package introduces support for the current :ref:`accelerator<accelerators>` in python.
 """
 
-from typing import Optional
+from typing import Any, Optional
 from typing_extensions import deprecated
 
 import torch
@@ -24,6 +24,7 @@ __all__ = [
     "current_accelerator",
     "current_device_idx",  # deprecated
     "current_device_index",
+    "get_device_capability",
     "current_stream",
     "empty_cache",
     "device_count",
@@ -148,6 +149,27 @@ current_device_idx.__doc__ = r"""
         :func:`torch.accelerator.current_device_idx` is deprecated in favor of :func:`torch.accelerator.current_device_index`
         and will be removed in a future PyTorch release.
     """
+
+
+def get_device_capability(device: _device_t = None, /) -> dict[str, Any]:
+    r"""Return the capability of the currently selected device.
+
+    Args:
+        device (:class:`torch.device`, str, int, optional): The device to query capabilities for
+            :ref:`accelerator<accelerators>` device type. If not given,
+            use :func:`torch.accelerator.current_device_index` by default.
+
+    Returns:
+        dict[str, Any]: A dictionary containing device capability information. The dictionary includes:
+            - ``supported_dtypes`` (list[torch.dtype]): List of PyTorch data types supported by the device
+
+    Examples:
+        >>> # Query capabilities for current device
+        >>> capabilities = torch.accelerator.get_device_capability("cuda:0")
+        >>> print("Supported dtypes:", capabilities["supported_dtypes"])
+    """
+    device_index = _get_device_index(device, optional=True)
+    return torch._C._accelerator_getDeviceCapability(device_index)
 
 
 def set_device_index(device: _device_t, /) -> None:
