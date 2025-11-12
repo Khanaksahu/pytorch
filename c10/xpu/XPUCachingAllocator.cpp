@@ -1089,7 +1089,7 @@ class DeviceCachingAllocator {
 
 static void local_raw_delete(void* ptr);
 
-class XPUAllocator : public DeviceAllocator {
+class XPUCachingAllocator : public XPUAllocator {
  private:
   alignas(hardware_destructive_interference_size) std::mutex mutex;
   ska::flat_hash_map<void*, Block*> allocated_blocks;
@@ -1124,7 +1124,7 @@ class XPUAllocator : public DeviceAllocator {
  public:
   std::vector<std::unique_ptr<DeviceCachingAllocator>> device_allocators;
 
-  void init(DeviceIndex device_count) {
+  void init(DeviceIndex device_count) override {
     const auto size = static_cast<DeviceIndex>(device_allocators.size());
     if (size < device_count) {
       device_allocators.resize(device_count);
@@ -1172,9 +1172,9 @@ class XPUAllocator : public DeviceAllocator {
     }
   }
 
-  void emptyCache(MempoolId_t mempool_id [[maybe_unused]] = {0, 0}) override {
+  void emptyCache(MempoolId_t mempool_id) override {
     for (auto& da : device_allocators) {
-      da->emptyCache();
+      da->emptyCache(mempool_id);
     }
   }
 
@@ -1205,7 +1205,7 @@ class XPUAllocator : public DeviceAllocator {
     return &local_raw_delete;
   }
 
-  void* raw_alloc(size_t size) {
+  void* raw_alloc(size_t size) override {
     if (size == 0) {
       return nullptr;
     }
@@ -1215,7 +1215,7 @@ class XPUAllocator : public DeviceAllocator {
     return r;
   }
 
-  void* raw_alloc_with_stream(size_t size, XPUStream stream) {
+  void* raw_alloc_with_stream(size_t size, XPUStream stream) override {
     if (size == 0) {
       return nullptr;
     }
@@ -1225,7 +1225,7 @@ class XPUAllocator : public DeviceAllocator {
     return r;
   }
 
-  void raw_delete(void* ptr) {
+  void raw_delete(void* ptr) override {
     this->free(ptr);
   }
 

@@ -4,7 +4,15 @@
 #include <c10/core/CachingDeviceAllocator.h>
 #include <c10/xpu/XPUStream.h>
 
+
 namespace c10::xpu::XPUCachingAllocator {
+class XPUAllocator : public DeviceAllocator {
+ public:
+  virtual void init(DeviceIndex device_count) = 0;
+  virtual void* raw_alloc(size_t size) = 0;
+  virtual void* raw_alloc_with_stream(size_t size, XPUStream stream) = 0;
+  virtual void raw_delete(void* ptr) = 0;
+};
 
 C10_XPU_API Allocator* get();
 
