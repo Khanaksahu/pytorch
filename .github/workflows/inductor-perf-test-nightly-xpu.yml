@@ -85,7 +85,7 @@ jobs:
       runner_prefix: "${{ needs.get-label-type.outputs.label-type }}"
       build-environment: linux-noble-xpu-n-py3.10
       docker-image-name: ci-image:pytorch-linux-noble-xpu-n-py3-inductor-benchmarks
-      runner: linux.c7i.12xlarge
+      runner: linux.c7i.2xlarge
       test-matrix: |
         { include: [
           { config: "inductor_huggingface_perf_xpu", shard: 1, num_shards: 5, runner: "linux.idc.xpu" },
