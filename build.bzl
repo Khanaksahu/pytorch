@@ -93,7 +93,7 @@ def define_targets(rules):
 
     rules.genrule(
         name = "gen_aten",
-        srcs = gen_aten_srcs,
+        srcs = gen_aten_srcs + ["//torch/headeronly:enum_tag_h"],  # Depend on enum_tag.h from torch/headeronly
         outs = gen_aten_outs,
         cmd = gen_aten_cmd,
         tools = ["//torchgen:gen"],

@@ -400,6 +400,7 @@ def get_aten_generated_files(enabled_backends):
         "core/aten_interned_strings.h",
         "core/enum_tag.h",
         "torch/csrc/inductor/aoti_torch/generated/c_shim_cpu.cpp",
+        "torch/headeronly/core/enum_tag.h",
     ] + get_aten_derived_type_srcs(enabled_backends)
 
     # This is tiresome.  A better strategy would be to unconditionally
