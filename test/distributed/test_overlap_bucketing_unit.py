@@ -10,6 +10,7 @@ import torch.fx as fx
 
 # for some reason importing functional collectives after dynamo breaks collectives handling!
 from torch._C import FileCheck
+from torch._dynamo.utils import same
 from torch._inductor.test_case import TestCase as InductorTestCase
 from torch._subclasses.fake_tensor import FakeTensorMode
 from torch.fx.experimental.proxy_tensor import make_fx
@@ -566,6 +567,58 @@ class TestOverlapPreservingBucketing(InductorTestCase):
         FileCheck().check_count("all_gather_into_tensor_out", 1, exactly=False).run(
             graph_str
         )
+
+    def test_split_mm(self):
+        def func(a, b):
+            a = a * 2
+            b = b * 3
+            mm = torch.mm(a, b)
+            mm = mm * 2
+            return mm
+
+        def _inps():
+            return torch.randn(16, 8, device=self.device), torch.randn(
+                8, 4, device=self.device
+            )
+
+        inps = _inps()
+        ref_out = func(*inps)
+
+        gm = make_fx(func, tracing_mode="fake")(*inps)
+
+        from torch._inductor.fx_passes.decompose_mm import split_mms
+
+        split_mms(gm, 16, 4)
+        graph_str = str(gm.graph)
+        FileCheck().check_count(
+            "torch.ops.aten.mm",
+            4,
+            exactly=True,
+        ).run(graph_str)
+        out = gm(*inps)
+
+        self.assertTrue(same(out, ref_out))
+
+    def test_split_mm_noncont(self):
+        # Non contiguous matmuls are not split
+        def func(a, b):
+            return torch.mm(a, b)
+
+        def _inps():
+            return torch.empty_strided((16, 8), (1, 8)), torch.randn(8, 4)
+
+        inps = _inps()
+
+        gm = make_fx(func, tracing_mode="fake")(*inps)
+        from torch._inductor.fx_passes.decompose_mm import split_mms
+
+        split_mms(gm, 16, 4)
+        graph_str = str(gm.graph)
+        FileCheck().check_count(
+            "torch.ops.aten.mm",
+            1,
+            exactly=True,
+        ).run(graph_str)
 
 
 if __name__ == "__main__":
