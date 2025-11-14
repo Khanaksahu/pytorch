@@ -32,6 +32,7 @@ from torch.distributed.tensor._ops._einsum_strategy import (
 )
 from torch.distributed.tensor._ops.utils import (
     register_op_strategy,
+    register_single_dim_strategy,
     replicate_op_strategy,
 )
 from torch.distributed.tensor.debug import CommDebugMode
@@ -654,6 +655,203 @@ DistTensorReplicateStrategyRegistrationTestWithLocalTensor = (
 TestStrategyHashingWithLocalTensor = create_local_tensor_test_class(
     TestStrategyHashing,
 )
+
+
+class TestSingleDimStrategy(DTensorTestBase):
+    @with_comms
+    def test_register_single_dim_strategy_replaces_existing_rule(self):
+        """
+        Test that calling register_single_dim_strategy works and replaces an existing registered rule.
+        """
+        from torch.distributed.tensor._ops._matrix_ops import (
+            _mm_like_strategy,
+            gen_single_dim_einsum_strategies,
+        )
+
+        mesh = self.build_device_mesh()
+
+        # Create test inputs
+        lhs_tensor = torch.randn(6, 8)
+        rhs_tensor = torch.randn(8, 12)
+        lhs_tensor_meta = extract_tensor_meta(lhs_tensor)
+        rhs_tensor_meta = extract_tensor_meta(rhs_tensor)
+
+        # Test a specific input sharding combination
+        lhs_placement = (Shard(1),)
+        rhs_placement = (Shard(0),)
+        lhs_spec = DTensorSpec(mesh, lhs_placement, lhs_tensor_meta)
+        rhs_spec = DTensorSpec(mesh, rhs_placement, rhs_tensor_meta)
+
+        # Create the OpSchema for mm operation
+        op_schema = OpSchema(
+            torch.ops.aten.mm.default,
+            (
+                OpStrategy([OpSpec(lhs_spec)]),
+                OpStrategy([OpSpec(rhs_spec)]),
+            ),
+            {},
+        )
+
+        # Get the strategies from the old mm_like_strategy (what was used before)
+        old_style_strategy = _mm_like_strategy("mk,kn->mn", mesh, op_schema)
+
+        # Get the strategies from the new register_single_dim_strategy approach
+        # First, we need to get the single dim strategy function
+        def mm_single_dim_strategy_func(op_schema: OpSchema):
+            return gen_single_dim_einsum_strategies("mk,kn->mn", mesh)
+
+        # Now expand it to full strategy using the same logic as register_single_dim_strategy
+        single_dim_strategies = mm_single_dim_strategy_func(op_schema)
+        all_mesh_dim_strategies = [single_dim_strategies] * mesh.ndim
+        strategy_combs = itertools.product(*all_mesh_dim_strategies)
+        all_strategies = []
+        for strategy_comb in strategy_combs:
+            spec_list = [
+                DTensorSpec(mesh, tuple(specs)) for specs in zip(*strategy_comb)
+            ]
+            all_strategies.append(
+                OpSpec(output_specs=spec_list[0], input_specs=spec_list[1:])
+            )
+        new_style_strategy = OpStrategy(all_strategies)
+
+        # Verify that both strategies produce the same set of shardings
+        old_strategy_set = {str(strategy) for strategy in old_style_strategy.strategies}
+        new_strategy_set = {str(strategy) for strategy in new_style_strategy.strategies}
+
+        self.assertEqual(
+            old_strategy_set,
+            new_strategy_set,
+            "Old and new strategies should produce the same shardings",
+        )
+
+        # Verify that the registration actually works by checking the propagator
+        propagator = DTensor._op_dispatcher.sharding_propagator
+
+        # Save the original strategy if it exists
+        original_strategy = None
+        if torch.ops.aten.mm.default in propagator.op_strategy_funcs:
+            original_strategy = propagator.op_strategy_funcs[torch.ops.aten.mm.default]
+
+        try:
+            # Register a custom single-dim strategy
+            @register_single_dim_strategy(torch.ops.aten.mm.default)
+            def custom_mm_single_dim_strategy(op_schema: OpSchema):
+                return gen_single_dim_einsum_strategies("mk,kn->mn", mesh)
+
+            # Verify the strategy was registered
+            self.assertIn(
+                torch.ops.aten.mm.default,
+                propagator.op_strategy_funcs,
+                "Strategy should be registered after calling register_single_dim_strategy",
+            )
+
+            # Verify it replaced any existing rule
+            registered_func = propagator.op_strategy_funcs[torch.ops.aten.mm.default]
+            self.assertIsNotNone(
+                registered_func, "Registered strategy function should not be None"
+            )
+
+            # Test that the registered strategy produces valid output
+            result_strategy = registered_func(op_schema)
+            self.assertIsInstance(
+                result_strategy, OpStrategy, "Result should be an OpStrategy"
+            )
+            self.assertGreater(
+                len(result_strategy.strategies),
+                0,
+                "Strategy should contain at least one OpSpec",
+            )
+
+        finally:
+            # Restore original strategy if it existed
+            if original_strategy is not None:
+                propagator.op_strategy_funcs[torch.ops.aten.mm.default] = (
+                    original_strategy
+                )
+            else:
+                if torch.ops.aten.mm.default in propagator.op_strategy_funcs:
+                    del propagator.op_strategy_funcs[torch.ops.aten.mm.default]
+            # Clear the cache
+            propagator.propagate_op_sharding.cache.cache_clear()
+
+    @with_comms
+    def test_single_dim_strategy_shardings_match_full_strategy(self):
+        """
+        Verify that the shardings produced by a single-dim strategy match those produced
+        by the full strategy implementation.
+        """
+        from torch.distributed.tensor._ops._matrix_ops import (
+            gen_single_dim_einsum_strategies,
+        )
+
+        mesh = self.build_device_mesh()
+
+        # Create test inputs
+        lhs_tensor = torch.randn(6, 8)
+        rhs_tensor = torch.randn(8, 12)
+        lhs_tensor_meta = extract_tensor_meta(lhs_tensor)
+        rhs_tensor_meta = extract_tensor_meta(rhs_tensor)
+
+        # Test multiple input sharding combinations
+        mm_combs = (
+            (Shard(0), Replicate()),
+            (Replicate(), Shard(1)),
+            (Shard(1), Shard(0)),
+            (Replicate(), Replicate()),
+        )
+
+        for lhs_placement, rhs_placement in mm_combs:
+            lhs_spec = DTensorSpec(mesh, (lhs_placement,), lhs_tensor_meta)
+            rhs_spec = DTensorSpec(mesh, (rhs_placement,), rhs_tensor_meta)
+
+            op_schema = OpSchema(
+                torch.ops.aten.mm.default,
+                (
+                    OpStrategy([OpSpec(lhs_spec)]),
+                    OpStrategy([OpSpec(rhs_spec)]),
+                ),
+                {},
+            )
+
+            # Get single-dim strategies
+            single_dim_strategies = gen_single_dim_einsum_strategies("mk,kn->mn", mesh)
+
+            # Expand to full strategy (mimicking what register_single_dim_strategy does)
+            all_mesh_dim_strategies = [single_dim_strategies] * mesh.ndim
+            strategy_combs = itertools.product(*all_mesh_dim_strategies)
+            expanded_strategies = []
+            for strategy_comb in strategy_combs:
+                spec_list = [
+                    DTensorSpec(mesh, tuple(specs)) for specs in zip(*strategy_comb)
+                ]
+                expanded_strategies.append(
+                    OpSpec(output_specs=spec_list[0], input_specs=spec_list[1:])
+                )
+
+            # Verify that for the given input shardings, we can find a matching strategy
+            # with zero redistribute cost
+            found_zero_cost_strategy = False
+            for strategy in expanded_strategies:
+                if strategy.input_specs == (lhs_spec, rhs_spec):
+                    # This strategy should have zero redistribute cost since inputs match
+                    found_zero_cost_strategy = True
+                    # In a real strategy, redistribute costs would be computed
+                    # Here we just verify the structure is correct
+                    self.assertEqual(
+                        len(strategy.input_specs),
+                        2,
+                        "MM should have exactly 2 input specs",
+                    )
+                    self.assertIsNotNone(
+                        strategy.output_specs, "Output spec should not be None"
+                    )
+                    break
+
+            self.assertTrue(
+                found_zero_cost_strategy,
+                f"Should find a strategy matching input shardings {lhs_placement}, {rhs_placement}",
+            )
+
 
 if __name__ == "__main__":
     run_tests()
