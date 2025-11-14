@@ -131,15 +131,6 @@ namespace Native {
  *                  notifyCaptureDestroy.
  */
 
-constexpr size_t kMinBlockSize =
-    512; // all sizes are rounded to at least 512 bytes
-constexpr size_t kSmallSize = 1048576; // largest "small" allocation is 1 MiB
-constexpr size_t kSmallBuffer =
-    2097152; // "small" allocations are packed in 2 MiB blocks
-constexpr size_t kMinLargeAlloc =
-    10485760; // allocations between 1 and 10 MiB may use kLargeBuffer
-constexpr size_t kRoundLarge = 2097152; // round up large allocations to 2 MiB
-
 static char SHAREABLE_HANDLE_VERSION = 2;
 enum ShareableHandleType : char {
   SHAREABLE_CUDA_MALLOC = 'c',
@@ -941,7 +932,7 @@ class EventPool {
 
  private:
   struct PerDevicePool {
-    alignas(64) std::mutex mutex_;
+    alignas(hardware_destructive_interference_size) std::mutex mutex_;
     std::vector<std::unique_ptr<cudaEvent_t>> event_pool_;
   };
   std::vector<PerDevicePool> pools_;
@@ -1020,12 +1011,6 @@ PrivatePoolState::PrivatePoolState(
     segments.emplace_back(head);
   }
 }
-
-struct MempoolIdHash {
-  std::size_t operator()(const MempoolId_t& mempool_id) const noexcept {
-    return mempool_id.first != 0 ? mempool_id.first : mempool_id.second;
-  }
-};
 
 cudaError_t allocPrimitive(void** ptr, size_t size, AllocParams& p) {
   if (p.pool->owner_PrivatePool && p.pool->owner_PrivatePool->allocator()) {
@@ -1109,7 +1094,7 @@ class RingBuffer {
 } // anonymous namespace
 } // namespace Native
 
-static std::string reportProcessMemoryInfo(c10::DeviceIndex device) {
+static std::string reportProcessMemoryInfo(const cudaDeviceProp& prop) {
 #ifdef PYTORCH_C10_DRIVER_API_SUPPORTED
   void* nvml_handle = DriverAPI::get_nvml_handle();
   if (!nvml_handle) {
@@ -1119,9 +1104,6 @@ static std::string reportProcessMemoryInfo(c10::DeviceIndex device) {
     TORCH_INTERNAL_ASSERT(NVML_SUCCESS == DriverAPI::get()->nvmlInit_v2_());
     return true;
   }();
-
-  cudaDeviceProp prop{};
-  C10_CUDA_CHECK(cudaGetDeviceProperties(&prop, device));
 
   // NOLINTNEXTLINE(*-c-arrays)
   char pci_id[80];
@@ -1224,13 +1206,15 @@ class DeviceCachingAllocator {
   // record used memory.
   size_t total_allocated_memory = 0;
 
-  size_t allowed_memory_maximum = 0;
+  cudaDeviceProp device_prop;
+
+  // maximum amount of memory that device is allowed to
+  // allocate. This is set iff memory fraction is less than 1
+  std::optional<size_t> allowed_memory_maximum{std::nullopt};
 
   // all live expandable segments
   std::vector<ExpandableSegment*> expandable_segments_;
   std::vector<c10::DeviceIndex> devices_with_peer_access_;
-
-  bool set_fraction = false;
 
   bool record_history = false;
 
@@ -1273,6 +1257,9 @@ class DeviceCachingAllocator {
       : device_id(id),
         large_blocks(/*small=*/false),
         small_blocks(/*small=*/true) {
+    C10_CUDA_CHECK(cudaGetDeviceProperties(&device_prop, id));
+
+    setMemoryFraction(CUDAAllocatorConfig::per_process_memory_fraction());
     stats.max_split_size =
         static_cast<int64_t>(AcceleratorAllocatorConfig::max_split_size());
     context_recorder_.store(nullptr);
@@ -1408,7 +1395,7 @@ class DeviceCachingAllocator {
     if (!block_found) {
       // Do garbage collection if the flag is set.
       if (C10_UNLIKELY(
-              set_fraction &&
+              allowed_memory_maximum.has_value() &&
               AcceleratorAllocatorConfig::garbage_collection_threshold() >
                   0.0)) {
         garbage_collect_cached_blocks(context);
@@ -1465,11 +1452,12 @@ class DeviceCachingAllocator {
       C10_CUDA_CHECK(cudaMemGetInfo(&device_free, &device_total));
       std::string allowed_info;
 
-      if (set_fraction) {
-        allowed_info = format_size(allowed_memory_maximum) + " allowed; ";
+      if (allowed_memory_maximum.has_value()) {
+        allowed_info =
+            format_size(allowed_memory_maximum.value()) + " allowed; ";
       }
 
-      std::string proc_info = reportProcessMemoryInfo(device_id);
+      std::string proc_info = reportProcessMemoryInfo(device_prop);
 
       record_trace(
           TraceEntry::OOM,
@@ -1527,7 +1515,7 @@ class DeviceCachingAllocator {
       for (const auto& obs : observers_local) {
         obs(device_id,
             alloc_size,
-            set_fraction ? allowed_memory_maximum : device_total,
+            allowed_memory_maximum.value_or(device_total),
             device_free);
       }
 
@@ -2024,25 +2012,26 @@ class DeviceCachingAllocator {
 
   /** get memory fraction limiting maximum allocated memory **/
   double getMemoryFraction() {
-    if (!set_fraction) {
+    if (!allowed_memory_maximum.has_value()) {
       return 1.0;
     }
 
-    size_t device_free = 0;
-    size_t device_total = 0;
-    C10_CUDA_CHECK(cudaMemGetInfo(&device_free, &device_total));
-    return static_cast<double>(allowed_memory_maximum) /
-        static_cast<double>(device_total);
+    return static_cast<double>(allowed_memory_maximum.value()) /
+        static_cast<double>(device_prop.totalGlobalMem);
   }
 
   /** set memory fraction to limit maximum allocated memory **/
   void setMemoryFraction(double fraction) {
-    size_t device_free = 0;
-    size_t device_total = 0;
-    C10_CUDA_CHECK(cudaMemGetInfo(&device_free, &device_total));
-    allowed_memory_maximum =
-        static_cast<size_t>(fraction * static_cast<double>(device_total));
-    set_fraction = true;
+    TORCH_CHECK(
+        0 <= fraction && fraction <= 1,
+        "invalid fraction:",
+        fraction,
+        ". Please set within [0, 1].");
+    allowed_memory_maximum = std::nullopt;
+    if (fraction < 1.0) {
+      allowed_memory_maximum = static_cast<size_t>(
+          fraction * static_cast<double>(device_prop.totalGlobalMem));
+    }
   }
 
   /** get expandable segment size for all the streams on device **/
@@ -3019,7 +3008,7 @@ class DeviceCachingAllocator {
     BlockPool& pool = *p.pool;
 
     if (C10_UNLIKELY(
-            set_fraction &&
+            allowed_memory_maximum.has_value() &&
             AcceleratorAllocatorConfig::garbage_collection_threshold() > 0.0)) {
       // Track block reuse interval only when garbage collection is enabled.
       ++pool.get_free_blocks_call_count;
@@ -3092,7 +3081,7 @@ class DeviceCachingAllocator {
 
     size_t gc_threshold = static_cast<size_t>(
         AcceleratorAllocatorConfig::garbage_collection_threshold() *
-        static_cast<double>(allowed_memory_maximum));
+        static_cast<double>(allowed_memory_maximum.value()));
     // No need to trigger GC yet
     if (total_allocated_memory <= gc_threshold) {
       return;
@@ -3170,8 +3159,8 @@ class DeviceCachingAllocator {
 
     bool active_pool =
         p.pool->owner_PrivatePool && p.pool->owner_PrivatePool->allocator();
-    if (set_fraction &&
-        total_allocated_memory + size > allowed_memory_maximum) {
+    if (allowed_memory_maximum.has_value() &&
+        total_allocated_memory + size > allowed_memory_maximum.value()) {
       p.err = cudaErrorMemoryAllocation;
       return false;
       // Temporarily disable checkpointing & cudagraphs internally
@@ -3758,11 +3747,6 @@ static void uncached_delete(void* ptr) {
 static void local_raw_delete(void* ptr);
 thread_local std::stack<std::string> DeviceCachingAllocator::compile_context;
 thread_local std::string DeviceCachingAllocator::user_metadata;
-#ifdef __cpp_lib_hardware_interference_size
-using std::hardware_destructive_interference_size;
-#else
-static constexpr std::size_t hardware_destructive_interference_size = 64;
-#endif
 
 class NativeCachingAllocator : public CUDAAllocator {
  private:
@@ -3873,7 +3857,6 @@ class NativeCachingAllocator : public CUDAAllocator {
         "Allocator not initialized for device ",
         device,
         ": did you call init?");
-    C10_CUDA_CHECK(c10::cuda::SetDevice(device));
     return device_allocator[device]->getMemoryFraction();
   }
 
@@ -3883,12 +3866,6 @@ class NativeCachingAllocator : public CUDAAllocator {
         "Allocator not initialized for device ",
         device,
         ": did you call init?");
-    TORCH_CHECK(
-        0 <= fraction && fraction <= 1,
-        "invalid fraction:",
-        fraction,
-        ". Please set within [0, 1].");
-    C10_CUDA_CHECK(c10::cuda::SetDevice(device));
     device_allocator[device]->setMemoryFraction(fraction);
   }
 
@@ -4483,7 +4460,10 @@ struct BackendStaticInitializer {
         if (key == "backend") {
           tokenizer.checkToken(++i, ":");
           i++; // Move to the value after the colon
-          if (tokenizer[i] == "cudaMallocAsync"
+          // break up token to trick hipify
+          if (tokenizer[i] ==
+                  "c"
+                  "udaMallocAsync"
 #ifdef USE_ROCM
               // convenience for ROCm users to allow either CUDA or HIP env var
               || tokenizer[i] == "hipMallocAsync"
@@ -4524,66 +4504,3 @@ std::atomic<CUDAAllocator*> allocator;
 static BackendStaticInitializer backend_static_initializer;
 } // namespace cuda::CUDACachingAllocator
 } // namespace c10
-
-namespace c10::cuda {
-
-// uid_ is incremented when a user creates a MemPool,
-// for example: using graph_pool_handle() or c10::cuda::MemPool().
-//
-// uuid_ is incremented when CUDAGraph creates a MemPool
-// as a result of a user not providing a pool.
-//
-// MempoolId_t of {0, 0} is used to denote when no MemPool has been
-// passed to a function, either by user or CUDAGraphs. For example,
-// default value of MempoolId_t for capture_begin function is {0, 0}.
-// That's why uid_ and uuid_ start at 1.
-std::atomic<CaptureId_t> MemPool::uid_{1};
-std::atomic<CaptureId_t> MemPool::uuid_{1};
-
-MemPool::MemPool(
-    CUDACachingAllocator::CUDAAllocator* allocator,
-    bool is_user_created,
-    bool use_on_oom)
-    : allocator_(allocator), is_user_created_(is_user_created) {
-  if (is_user_created_) {
-    id_ = {0, uid_++};
-  } else {
-    id_ = {uuid_++, 0};
-  }
-  device_ = c10::cuda::current_device();
-  CUDACachingAllocator::createOrIncrefPool(device_, id_, allocator);
-  if (use_on_oom) {
-    CUDACachingAllocator::setUseOnOOM(device_, id_);
-  }
-}
-
-MemPool::~MemPool() {
-  TORCH_INTERNAL_ASSERT(use_count() == 1);
-  CUDACachingAllocator::releasePool(device_, id_);
-  c10::cuda::CUDACachingAllocator::emptyCache(id_);
-}
-
-MempoolId_t MemPool::id() {
-  return id_;
-}
-
-CUDACachingAllocator::CUDAAllocator* MemPool::allocator() {
-  return allocator_;
-}
-
-int MemPool::use_count() {
-  return CUDACachingAllocator::getPoolUseCount(device_, id_);
-}
-
-c10::DeviceIndex MemPool::device() {
-  return device_;
-}
-
-MempoolId_t MemPool::graph_pool_handle(bool is_user_created) {
-  if (is_user_created) {
-    return {0, uid_++};
-  }
-  return {uuid_++, 0};
-}
-
-} // namespace c10::cuda
