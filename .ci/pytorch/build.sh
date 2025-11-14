@@ -86,6 +86,10 @@ else
   fi
 fi
 
+if [[ "$BUILD_ENVIRONMENT" == *zen* ]]; then
+  export USE_ZENDNN=1
+fi
+
 # Enable MKLDNN with ARM Compute Library for ARM builds
 if [[ "$BUILD_ENVIRONMENT" == *aarch64* ]]; then
   export USE_MKLDNN=1
