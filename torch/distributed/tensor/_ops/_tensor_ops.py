@@ -41,6 +41,8 @@ from torch.distributed.tensor.placement_types import (
 aten = torch.ops.aten
 
 
+# WHC- i think anywhere this is used, we can replace it with a corresponding single-dim passthrough strategy
+# (anyshard, replicate, partial can all pass through- and then expand that to the mesh dims later)
 def propagate_single_input_strategy(op_schema: OpSchema) -> StrategyType:
     # For ops with a single tensor input, we perform a 1:1 mapping such that
     # for each strategy that the input supports, we create a corresponding strategy.
@@ -97,6 +99,28 @@ register_op_strategy(
 )(propagate_single_input_strategy)
 
 
+"""
+WHC- equal_strategy is an example baking an optimization into the sharding rule.
+
+The unoptimized equal strategy (for one mesh dim) should look like this
+  S, S -> S
+  R, R -> R
+  P, P -> P * - this could work, i think, if we supported a Partial of boolean and reduction?
+And this should be expanded to the full mesh.
+
+But what this rule actually does is
+- compare the two tensor args to equal- look at the strategies for each, which represent the I-O sharding relationship for the
+  op that produced those tensor args.  Pick the one that has the strategy (OpSpec) with the most Shard() placements in it.
+    Why? becuase converting the other arg from R->S is cheaper than converting S->R
+
+- start with the assumption that the 'equal' op has the same strategy as the op that produced its max-shard input
+- then adjust the placements from partial to replicate since we don't support partial in equal
+- finally, produce an OpSpec that only populates the 'output_specs' of OpSpec
+
+TODO: why is it ok to populate only the output_specs of an OpSpec?  Is it defined to mean that all input specs are the same as the output spec?
+"""
+
+
 @register_op_strategy(
     [
         aten.equal.default,
@@ -138,6 +162,19 @@ def equal_strategy(op_schema: OpSchema) -> StrategyType:
         else:
             equal_strategy.strategies.append(OpSpec(arg_spec))
     return equal_strategy
+
+
+"""
+WHC
+seems like we could replace this with single-mesh strategy
+S->S
+R->R
+P->R
+
+The P->R thing is odd, but makes sense:
+* can't support P->P since it would be incorrect to create a new 'partial' tensor from ones, which would no longer be ones if we replicated them
+* don't want to omit the support for input Partial becuase we'd force a replication on the input which would be wasteful
+"""
 
 
 @register_op_strategy(
@@ -479,6 +516,19 @@ def replicate_tensor_dim(
         Replicate() if p.is_partial() or isinstance(p, Shard) and p.dim == dim else p
         for p in placements
     )
+
+
+"""
+WHC- example of a complicated 'follow your inputs' strategy that would be useful to try out as a simple rule
+
+seems very simple to write this way
+
+assert input, src same ndim
+for i in range(input.ndim):
+    if i != slice_dim:
+       Shard(i), Shard(i) -> Shard(i)
+
+"""
 
 
 @register_op_strategy(aten.slice_scatter.default, schema_info=RuntimeSchemaInfo(2))
