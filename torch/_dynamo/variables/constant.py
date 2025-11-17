@@ -8,7 +8,7 @@ maintaining type safety through the compilation process.
 
 import enum
 import operator
-from typing import Any, Literal, Optional, TYPE_CHECKING, Union
+from typing import Any, Literal, Optional, TYPE_CHECKING, Union, overload
 
 import torch
 from torch._dynamo.source import AttrSource, GetItemSource
@@ -37,6 +37,11 @@ class ConstantVariable(VariableTracker):
     The create() method intelligently constructs appropriate variable types for
     nested collections.
     """
+
+    @overload
+    @staticmethod
+    def create(value:bool, **kwargs) -> "ConstantVariable":
+        return ConstantVariable(value, **kwargs)
 
     @staticmethod
     def create(value: Any, **kwargs: Any) -> VariableTracker:
