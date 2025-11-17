@@ -64,6 +64,7 @@ from .common import (
     ArgName,
     CodeGen,
     DeferredLine,
+    get_scheduling_for_device,
     PythonPrinter,
     WorkspaceArg,
     WorkspaceZeroMode,
@@ -2301,7 +2302,18 @@ class PythonWrapperCodegen(CodeGen):
             TensorArg,
             TMADescriptorArg,
         )
-        from .triton import gen_common_triton_imports, TritonKernel
+        from .triton import TritonKernel, TritonScheduling
+
+        triton_kernel_cls: type[TritonKernel] = TritonKernel
+
+        # Use a triton kernel subclass if available to provide metadata for the
+        # user defined triton kernel
+        device = V.graph.get_current_device_or_throw()
+        device_scheduler = get_scheduling_for_device(device)
+        if isinstance(device_scheduler, TritonScheduling) and issubclass(
+            device_scheduler.kernel_type, TritonKernel
+        ):
+            triton_kernel_cls = cast(type[TritonKernel], device_scheduler.kernel_type)
 
         original_name = kernel.__name__
         signature: list[KernelArgType] = []
@@ -2418,7 +2430,7 @@ class PythonWrapperCodegen(CodeGen):
         )
         triton_meta: dict[str, Any] = {
             "signature": triton_signature,
-            "device": DeviceProperties.create(V.graph.get_current_device_or_throw()),
+            "device": DeviceProperties.create(device),
             # Triton compiler includes equal_to_1 args into constants even
             # when they are not constexpr. otherwise there may be a segfault
             # during launching the Inductor-compiled Triton kernel.
@@ -2514,9 +2526,9 @@ class PythonWrapperCodegen(CodeGen):
             compile_wrapper.writeline(f"async_compile.triton({original_name!r}, '''")
 
         inductor_meta["kernel_name"] = name
-        inductor_meta.update(TritonKernel.inductor_meta_common())
+        inductor_meta.update(triton_kernel_cls.inductor_meta_common())
 
-        compile_wrapper.splice(gen_common_triton_imports())
+        compile_wrapper.splice(triton_kernel_cls.gen_common_triton_imports())
         compile_wrapper.splice(
             f"""
             @triton_heuristics.user_autotune(
