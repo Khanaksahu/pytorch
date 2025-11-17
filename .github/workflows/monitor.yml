@@ -16,8 +16,11 @@ on:
         required: false
         default: 'pytorch'
   schedule:
-    - cron: '25 19 * * *'  # Runs at 19:25 UTC (in ~5 minutes for testing)
+    - cron: '28 19 * * *'  # Runs at 19:30 UTC (in ~4 minutes for testing)
   push:
+    branches:
+      - main
+      - master
 
 permissions:
   contents: read
