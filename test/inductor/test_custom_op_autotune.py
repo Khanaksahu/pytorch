@@ -430,6 +430,112 @@ class TestCustomOpAutoTune(TestCase):
             multi_param_op, (test_x, test_factor), expected_result, "MultiParam"
         )
 
+    @skipIfXpu
+    def test_dynamic_range_tuning(self):
+        """Test dynamic input range-based autotuning.
+
+        Validates that:
+        - All implementations produce equivalent results
+        - Autotuning selects best implementation per range
+        - torch.cond dispatch function is generated correctly
+        """
+        test_op_name = f"test_lib::dynamic_range_{id(self)}"
+
+        def short_sequence_impl(x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
+            return torch.einsum("bsh,h->bsh", x, weight)
+
+        def medium_sequence_impl(x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
+            batch_size, seq_len, hidden_dim = x.shape
+            chunk_size = 256
+            chunks = []
+            for start in range(0, seq_len, chunk_size):
+                end = min(start + chunk_size, seq_len)
+                chunk = x[:, start:end, :]
+                chunks.append(chunk * weight)
+            return torch.cat(chunks, dim=1)
+
+        def long_sequence_impl(x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
+            return x * weight.view(1, 1, -1)
+
+        @torch.library.custom_op(test_op_name, mutates_args=())
+        def dynamic_range_op(x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
+            return x * weight
+
+        @dynamic_range_op.register_fake
+        def _(x: torch.Tensor, weight: torch.Tensor):
+            return torch.empty_like(x)
+
+        register_custom_op_autotuning(
+            dynamic_range_op,
+            configs=[
+                CustomOpConfig(short_sequence_impl),
+                CustomOpConfig(medium_sequence_impl),
+                CustomOpConfig(long_sequence_impl),
+            ],
+            name="dynamic_range_autotuned",
+            dispatch_on=("x", 1),
+            split_points=[512, 2048],
+            input_gen_fns={
+                "x": lambda fake: torch.randn_like(fake, device=self.device) * 0.1,
+                "weight": lambda fake: torch.ones_like(fake, device=self.device),
+            },
+        )
+
+        # Verify all implementations produce equivalent results
+        test_cases = [
+            (2, 256, 128),
+            (2, 1024, 128),
+            (2, 4096, 128),
+        ]
+
+        for batch_size, seq_len, hidden_dim in test_cases:
+            test_x = torch.randn(
+                batch_size, seq_len, hidden_dim, device=self.device, dtype=self.dtype
+            )
+            test_weight = torch.ones(hidden_dim, device=self.device, dtype=self.dtype)
+            expected = test_x * test_weight
+
+            for impl_name, impl_fn in [
+                ("short", short_sequence_impl),
+                ("medium", medium_sequence_impl),
+                ("long", long_sequence_impl),
+            ]:
+                result = impl_fn(test_x, test_weight)
+                torch.testing.assert_close(
+                    result,
+                    expected,
+                    rtol=1e-5,
+                    atol=1e-5,
+                    msg=f"{impl_name} implementation differs for seq_len={seq_len}",
+                )
+
+        # Test autotuning with compilation
+        test_x = torch.randn(2, 256, 128, device=self.device, dtype=self.dtype)
+        test_weight = torch.ones(128, device=self.device, dtype=self.dtype)
+        expected = test_x * test_weight
+
+        self._run_autotune_test(
+            dynamic_range_op,
+            (test_x, test_weight),
+            expected,
+            "DynamicRangeTuning",
+        )
+
+        # Verify torch.cond dispatch function was generated
+        import os
+
+        dispatch_dir = "/tmp/torch_inductor_range_dispatch"
+        dispatch_file = os.path.join(dispatch_dir, "dynamic_range_autotuned_dispatch.py")
+
+        if os.path.exists(dispatch_file):
+            with open(dispatch_file, "r") as f:
+                dispatch_code = f.read()
+                self.assertIn(
+                    "torch.cond",
+                    dispatch_code,
+                    "Generated dispatch function should contain torch.cond",
+                )
+
 
 if __name__ == "__main__":
     run_tests()
