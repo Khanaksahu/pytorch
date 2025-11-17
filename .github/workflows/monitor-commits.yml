@@ -1,13 +1,21 @@
 name: Monitor Windows PR Activity
 
 on:
+  # Trigger when pushed to main (runs immediately when workflow is added)
+  push:
+    branches:
+      - main
+      - master
+    paths:
+      - '.github/workflows/monitor-windows-commits.yml'
+  
   # Trigger on pull requests for testing/debugging
   pull_request:
     branches:
       - main
       - master
   
-  # Run every 24 hours at 00:00 UTC
+  # Run every 24 hours at 23:00 UTC
   schedule:
     - cron: '0 23 * * *'
   
