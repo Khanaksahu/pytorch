@@ -1,4 +1,4 @@
-name: Monitor Windows PR Activity
+name: Monitor Windows PR Activity 
 
 on:
   # Trigger on any push (for testing)
