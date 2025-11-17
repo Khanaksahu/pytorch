@@ -5526,6 +5526,32 @@ class CommonTemplate:
             check_lowp=not is_halide_backend(self.device),  # misaligned addr fp16
         )
 
+    def test_lp_pool1d_with_inf_norm(self):
+        # https://github.com/pytorch/pytorch/issues/167197
+        # Test that LPPool1d works with infinity norm (should behave like max pooling)
+        def fn(x):
+            return torch.nn.functional.lp_pool1d(
+                x, norm_type=float("inf"), kernel_size=2, stride=2
+            )
+
+        self.common(
+            fn,
+            (torch.randn(3, 4, 8),),
+        )
+
+    def test_lp_pool2d_with_inf_norm(self):
+        # https://github.com/pytorch/pytorch/issues/167197
+        # Test that LPPool2d works with infinity norm (should behave like max pooling)
+        def fn(x):
+            return torch.nn.functional.lp_pool2d(
+                x, norm_type=float("inf"), kernel_size=2, stride=2
+            )
+
+        self.common(
+            fn,
+            (torch.randn(3, 4, 8, 8),),
+        )
+
     @tf32_on_and_off(0.006)
     @skip_if_gpu_halide  # slow
     def test_alexnet_prefix(self):
