@@ -8,7 +8,7 @@ on:
   
   # Run every 24 hours at 23:00 UTC
   schedule:
-    - cron: '0 23 * * *'
+    - cron: '0 23 * * *' 
   
   # Allow manual trigger (use this to test immediately!)
   workflow_dispatch:
