@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       start_date:
-        description: 'Start date (YYYY-MM-DD)'
+        description: 'Start date (YYYY-MM-DD)' 
         required: false
         default: '2024-11-05'
       end_date:
