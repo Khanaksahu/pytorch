@@ -22,7 +22,7 @@ from torch.sparse._semi_structured_conversions import (
 )
 
 from torch.testing import make_tensor
-from torch.testing._internal.common_cuda import _get_torch_cuda_version, PLATFORM_SUPPORTS_FP8, xfailIfSM89
+from torch.testing._internal.common_cuda import _get_torch_cuda_version, IS_SM89, PLATFORM_SUPPORTS_FP8, xfailIfSM89
 from torch.testing._internal.common_device_type import (
     dtypes,
     instantiate_device_type_tests,
@@ -1117,12 +1117,13 @@ class TestSparseSemiStructuredCUSPARSELT(TestCase):
         not PLATFORM_SUPPORTS_FP8,
         "FP8 is only supported on H100+, SM 8.9 and MI300+ devices",
     )
-    @xfailIfSM89
     @parametrize("dense_input_shape", [(256, 128)])
     def test_sparse_fp8fp8_mm(self, dense_input_shape, device):
         if torch.backends.cusparselt.version() < 602:
             self.skipTest("fp8 matmul requires cuSPARSELt v0.6.2+")
-
+        # CUDA 13 can correctly raise NotImplementedError so passing this test is expected
+        if IS_SM89 and _get_torch_cuda_version() < (13, 0):
+            raise unittest.SkipTest("expected failure on SM 8.9 with CUDA < 13.0")
         A = rand_sparse_semi_structured_mask(256, 128, dtype=torch.float16)
         B = torch.rand(dense_input_shape, device=device).to(torch.float16).t()
 
@@ -1160,12 +1161,14 @@ class TestSparseSemiStructuredCUSPARSELT(TestCase):
         not PLATFORM_SUPPORTS_FP8,
         "FP8 is only supported on H100+, SM 8.9 and MI300+ devices",
     )
-    @xfailIfSM89
     @parametrize("out_dtype", [torch.float16, torch.bfloat16, torch.float32])
     @parametrize("dense_input_shape", [(256, 128)])
     def test_sparse_semi_structured_scaled_mm(
         self, dense_input_shape, device, out_dtype
     ):
+        # CUDA 13 can handle FP8 → other variants so passing this test is expected
+        if IS_SM89 and _get_torch_cuda_version() < (13, 0):
+            raise unittest.SkipTest("expected failure on SM 8.9 with CUDA < 13.0")
         A = rand_sparse_semi_structured_mask(256, 128, dtype=torch.float16)
         B = torch.rand(dense_input_shape, device=device).to(torch.float16).t()
 
