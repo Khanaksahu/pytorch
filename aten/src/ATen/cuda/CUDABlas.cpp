@@ -2077,6 +2077,10 @@ void scaled_gemm(
 
     // if device-tensor
     if (a.is_cuda()) {
+#ifndef USE_ROCM
+      TORCH_CHECK(false, "device-side alpha/beta is currently breaking with cublasLtMatmulAlgoGetHeuristic");
+#endif // ifndef USE_ROCM
+
       // NOTE: there are lifetime requirements on device-side pointers for alpha/beta -- the value must be
       //       valid & correct until the cublas call finishes (not is scheduled like host-side values). Thus
       //       we need to use allocations for alpha/beta that have some guarantees on lifetime - a statically
@@ -2180,8 +2184,14 @@ void scaled_gemm(
       mat2_ptr,
       Bdesc.descriptor(),
       beta_ptr,
+#ifdef USE_ROCM
       // NOTE: always use result_ptr here, because cuBLASLt w/device beta=0 can't handle nullptr either
       result_ptr, // unused, since beta_val is 0, but hipblaslt can't handle nullptr
+#else
+      // NOTE: cublasLtMatmul w/host beta=0 fails with result_ptr unless Cdesc uses the same dtype as
+      //     Ddesc, but this breaks cublasLtMatmulAlgoGetHeuristic, so nullptr is required for now
+      nullptr,
+#endif // ifdef USE_ROCM
       Cdesc.descriptor(),
       result_ptr,
       Ddesc.descriptor(),
