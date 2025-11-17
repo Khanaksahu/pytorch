@@ -1,26 +1,18 @@
 name: Monitor Windows PR Activity
 
 on:
-  workflow_dispatch:
-    inputs:
-      start_date:
-        description: 'Start date (YYYY-MM-DD)'
-        required: false
-        default: '2024-11-05'
-      end_date:
-        description: 'End date (YYYY-MM-DD)'
-        required: false
-        default: '2024-11-10'
-      repo_owner:
-        description: 'Repository owner (e.g., pytorch or your-username)'
-        required: false
-        default: 'pytorch'
-  schedule:
-    - cron: '28 19 * * *'  # Runs at 19:30 UTC (in ~4 minutes for testing)
-  push:
+  # Trigger on pull requests for testing/debugging
+  pull_request:
     branches:
       - main
       - master
+  
+  # Run every 24 hours at 00:00 UTC
+  schedule:
+    - cron: '0 23 * * *'
+  
+  # Allow manual trigger
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -30,365 +22,461 @@ jobs:
     runs-on: ubuntu-latest
     
     steps:
-      - name: Analyze date range (Nov 5 - Nov 10)
+      - name: Get time range
+        id: time
         run: |
-          # Date range: 2024-11-05 to 2024-11-10
-          START_DATE="2024-11-05"
-          END_DATE="2024-11-10"
+          # ============================================================
+          # CHANGE THIS DATE TO ANALYZE A DIFFERENT DAY (YYYY-MM-DD)
+          # ============================================================
+          START_DATE="2025-11-05"
+          # ============================================================
           
-          echo "=========================================="
-          echo "Windows PR Activity Report"
-          echo "Date Range: $START_DATE to $END_DATE"
-          echo "=========================================="
-          echo ""
+          # Analyze 24 hours starting from this date
+          SINCE="${START_DATE}T00:00:00Z"
           
-          # Convert dates to epoch for iteration
-          current_date="$START_DATE"
+          # Calculate end time (24 hours later)
+          END_EPOCH=$(date -u -d "$START_DATE + 1 day" '+%s')
+          NOW=$(date -u -d "$START_DATE + 1 day" '+%Y-%m-%dT%H:%M:%SZ')
+          NOW_DISPLAY=$(date -u -d "$START_DATE + 1 day" '+%Y-%m-%d %H:%M:%S UTC')
           
-          while [ "$current_date" != "$(date -u -d "$END_DATE + 1 day" '+%Y-%m-%d')" ]; do
-            echo ""
-            echo "=========================================="
-            echo "📅 ANALYZING DATE: $current_date"
-            echo "=========================================="
-            
-            # Set time range for this specific date
-            SINCE="${current_date}T00:00:00Z"
-            UNTIL=$(date -u -d "$current_date + 1 day" '+%Y-%m-%dT%H:%M:%SZ')
-            REPO="${{ github.repository }}"  # Automatically uses current repo (e.g., your-org/pytorch)
-            
-            echo "⏰ TIME RANGE: $current_date 00:00:00 UTC → $(date -u -d "$current_date + 1 day" '+%Y-%m-%d %H:%M:%S UTC')"
-            echo "📦 REPOSITORY: $REPO"
-            echo ""
-            
-            # Use GitHub Search API to find PRs updated on the specific date
-            SEARCH_DATE="$current_date"
-            
-            # Search for open PRs updated on the target date (up to 200 results)
-            echo "Fetching open PRs updated on $SEARCH_DATE..."
-            curl -s "https://api.github.com/search/issues?q=repo:$REPO+is:pr+is:open+base:main+updated:$SEARCH_DATE&per_page=100&page=1" \
+          HOURS="24"
+          
+          echo "start_date=$START_DATE" >> $GITHUB_OUTPUT
+          echo "since=$SINCE" >> $GITHUB_OUTPUT
+          echo "now=$NOW_DISPLAY" >> $GITHUB_OUTPUT
+          echo "hours=$HOURS" >> $GITHUB_OUTPUT
+          echo "Analyzing 24 hours: $START_DATE 00:00:00 to $NOW_DISPLAY"
+      
+      - name: Fetch and analyze PRs
+        id: analyze
+        run: |
+          # Fetch PRs active in the 24-hour time range
+          SINCE="${{ steps.time.outputs.since }}"
+          UNTIL=$(date -u -d "${{ steps.time.outputs.now }}" '+%Y-%m-%dT%H:%M:%SZ')
+          REPO="pytorch/pytorch"
+          
+          echo "Searching for PRs updated on ${{ steps.time.outputs.start_date }}..."
+          
+          # Use GitHub Search API to find PRs updated on the specific date
+          SEARCH_DATE="${{ steps.time.outputs.start_date }}"
+          
+          # Search for open PRs updated on the target date (up to 200 results)
+          echo "Fetching open PRs updated on $SEARCH_DATE..."
+          curl -s "https://api.github.com/search/issues?q=repo:$REPO+is:pr+is:open+base:main+updated:$SEARCH_DATE&per_page=100&page=1" \
+            -H "Accept: application/vnd.github.v3+json" \
+            | jq '.items' > open_prs_page1.json
+          
+          curl -s "https://api.github.com/search/issues?q=repo:$REPO+is:pr+is:open+base:main+updated:$SEARCH_DATE&per_page=100&page=2" \
+            -H "Accept: application/vnd.github.v3+json" \
+            | jq '.items' > open_prs_page2.json
+          
+          # Combine open PRs
+          jq -s 'add' open_prs_page1.json open_prs_page2.json > open_prs_all.json
+          
+          # Convert to our format and filter by exact time range
+          jq -c --arg since "$SINCE" --arg until "$UNTIL" '.[] | select(.updated_at >= $since and .updated_at <= $until) | {number: .number, title: .title, author: .user.login, created_at: .created_at, updated_at: .updated_at, state: "open", is_new: (.created_at >= $since)}' open_prs_all.json > active_prs.json
+          
+          # Search for merged PRs on the target date (up to 200 results)
+          echo "Fetching merged PRs on $SEARCH_DATE..."
+          curl -s "https://api.github.com/search/issues?q=repo:$REPO+is:pr+is:merged+base:main+merged:$SEARCH_DATE&per_page=100&page=1" \
+            -H "Accept: application/vnd.github.v3+json" \
+            | jq '.items' > merged_search_page1.json
+          
+          curl -s "https://api.github.com/search/issues?q=repo:$REPO+is:pr+is:merged+base:main+merged:$SEARCH_DATE&per_page=100&page=2" \
+            -H "Accept: application/vnd.github.v3+json" \
+            | jq '.items' > merged_search_page2.json
+          
+          # Combine merged search results
+          jq -s 'add' merged_search_page1.json merged_search_page2.json > merged_search_all.json
+          
+          # Convert merged PRs to our format (limit to first 30 to avoid too many API calls)
+          # Start with empty file (no initial content)
+          > merged_prs.json
+          for pr_num in $(jq -r '.[].number' merged_search_all.json 2>/dev/null | head -30); do
+            curl -s "https://api.github.com/repos/$REPO/pulls/$pr_num" \
               -H "Accept: application/vnd.github.v3+json" \
-              -H "Authorization: Bearer ${{ github.token }}" \
-              | jq '.items' > open_prs_page1.json
-            
-            sleep 2  # Rate limit protection
-            
-            curl -s "https://api.github.com/search/issues?q=repo:$REPO+is:pr+is:open+base:main+updated:$SEARCH_DATE&per_page=100&page=2" \
-              -H "Accept: application/vnd.github.v3+json" \
-              -H "Authorization: Bearer ${{ github.token }}" \
-              | jq '.items' > open_prs_page2.json
-            
-            # Combine open PRs
-            jq -s 'add' open_prs_page1.json open_prs_page2.json > open_prs_all.json
-            
-            # Convert to our format and filter by exact time range
-            jq -c --arg since "$SINCE" --arg until "$UNTIL" '.[] | select(.updated_at >= $since and .updated_at <= $until) | {number: .number, title: .title, author: .user.login, created_at: .created_at, updated_at: .updated_at, state: "open", is_new: (.created_at >= $since)}' open_prs_all.json > active_prs.json
-            
-            # Search for merged PRs on the target date (up to 200 results)
-            echo "Fetching merged PRs on $SEARCH_DATE..."
-            sleep 2  # Rate limit protection
-            
-            curl -s "https://api.github.com/search/issues?q=repo:$REPO+is:pr+is:merged+base:main+merged:$SEARCH_DATE&per_page=100&page=1" \
-              -H "Accept: application/vnd.github.v3+json" \
-              -H "Authorization: Bearer ${{ github.token }}" \
-              | jq '.items' > merged_search_page1.json
-            
-            sleep 2  # Rate limit protection
-            
-            curl -s "https://api.github.com/search/issues?q=repo:$REPO+is:pr+is:merged+base:main+merged:$SEARCH_DATE&per_page=100&page=2" \
-              -H "Accept: application/vnd.github.v3+json" \
-              -H "Authorization: Bearer ${{ github.token }}" \
-              | jq '.items' > merged_search_page2.json
-            
-            # Combine merged search results
-            jq -s 'add' merged_search_page1.json merged_search_page2.json > merged_search_all.json
-            
-            # Convert merged PRs to our format (limit to first 20 to reduce API calls)
-            # Start with empty file (no initial content)
-            > merged_prs.json
-            for pr_num in $(jq -r '.[].number' merged_search_all.json 2>/dev/null | head -20); do
-              curl -s "https://api.github.com/repos/$REPO/pulls/$pr_num" \
-                -H "Accept: application/vnd.github.v3+json" \
-                -H "Authorization: Bearer ${{ github.token }}" \
-                | jq -c --arg since "$SINCE" --arg until "$UNTIL" 'select(.merged_at != null and .merged_at >= $since and .merged_at <= $until) | {number: .number, title: .title, author: .user.login, created_at: .created_at, merged_at: .merged_at, state: "merged"}' \
-                >> merged_prs.json || true
-              sleep 0.5  # Small delay between PR fetches
-            done
-            
-            # Ensure file exists even if empty
-            touch merged_prs.json
-            
-            # Combine active and merged PRs
-            cat active_prs.json merged_prs.json > prs.json
-            
-            # Count PRs (count non-empty lines with proper handling of empty files)
-            TOTAL_ACTIVE=$(grep -c '^{' active_prs.json 2>/dev/null || echo "0")
-            TOTAL_ACTIVE=$(echo "$TOTAL_ACTIVE" | tr -d '\n')
-            NEW_PRS=$(jq -s '[.[] | select(.is_new == true)] | length' active_prs.json 2>/dev/null || echo "0")
-            NEW_PRS=$(echo "$NEW_PRS" | tr -d '\n')
-            UPDATED_PRS=$(jq -s '[.[] | select(.is_new == false)] | length' active_prs.json 2>/dev/null || echo "0")
-            UPDATED_PRS=$(echo "$UPDATED_PRS" | tr -d '\n')
-            TOTAL_MERGED=$(grep -c '^{' merged_prs.json 2>/dev/null || echo "0")
-            TOTAL_MERGED=$(echo "$TOTAL_MERGED" | tr -d '\n')
-            TOTAL_PRS=$(grep -c '^{' prs.json 2>/dev/null || echo "0")
-            TOTAL_PRS=$(echo "$TOTAL_PRS" | tr -d '\n')
-            
-            echo "Found $TOTAL_ACTIVE active PRs: $NEW_PRS newly created, $UPDATED_PRS recently updated"
-            echo "Found $TOTAL_MERGED merged PRs"
-            
-            # Create Python analysis script inline
-            cat > analyze.py << 'PYTHON_SCRIPT'
-import json
-import sys
-import subprocess
-
-# Windows-related patterns
-WINDOWS_PATTERNS = [
-    # Explicit Windows paths
-    'windows/', 'win-', '.bat', '.ps1', 'msvc', 'visual_studio',
-    'windows-pull', 'windows-binary', '_win-build', 'win-test',
-    'build_pytorch.bat', 'mingw', '.ci/pytorch/windows/',
-    
-    # Core build files (affect Windows compilation)
-    'cmakelists.txt', 'setup.py', 'pyproject.toml',
-    'cmake/', 'tools/build_pytorch_libs.py',
-    
-    # C10 core and utilities
-    'c10/core/', 'c10/cuda/', 'c10/util/',
-    
-    # ATen core dispatch and device management
-    'aten/src/aten/core/', 'aten/src/aten/native/dispatchstub',
-    'aten/src/aten/native/cpufallback', 'aten/src/aten/dispatch',
-    'aten/src/aten/context', 'aten/src/aten/device',
-    'aten/src/aten/deviceguard',
-    
-    # Torch CSRC - Python bindings and JIT
-    'torch/csrc/cuda/', 'torch/csrc/jit/codegen/cuda/',
-    'torch/csrc/autograd/engine/', 'torch/csrc/distributed/c10d/',
-    
-    # ATen CUDA implementations
-    'aten/src/aten/cuda/', 'aten/src/aten/native/cuda/',
-    'aten/src/aten/native/cudnn/', 'aten/src/aten/cudnn/',
-    
-    # Third-party GPU dependencies
-    'third_party/cudnn/', 'third_party/cutlass/',
-    'third_party/fbgemm/', 'third_party/onnx/',
-    
-    # ATen build configuration
-    'aten/cmakelists.txt', 'aten/src/aten/cmakelists.txt',
-    'aten/src/aten/cuda/cudaconfig.h',
-    
-    # FuncTorch (affects GPU compilation)
-    'functorch/src/',
-    
-    # Memory management
-    'aten/src/aten/native/memory.cpp', 'c10/core/allocator'
-]
-
-WINDOWS_KEYWORDS = [
-    'windows', 'win32', 'msvc', 'visual studio', 'mingw', '.bat',
-    'winbuild', 'vcpkg'
-]
-
-def is_windows_file(filepath):
-    """Check if file is Windows-related."""
-    filepath_lower = filepath.lower()
-    
-    for pattern in WINDOWS_PATTERNS:
-        if pattern in filepath_lower:
-            return True
-    
-    if filepath_lower.endswith(('.bat', '.ps1')):
-        return True
-    
-    path_parts = filepath_lower.split('/')
-    if 'windows' in path_parts or 'win' in path_parts:
-        return True
-    
-    return False
-
-def is_windows_pr(title, files):
-    """Check if PR is Windows-related."""
-    title_lower = title.lower()
-    
-    # Check title
-    if any(keyword in title_lower for keyword in WINDOWS_KEYWORDS):
-        return True
-    
-    # Check files
-    return any(is_windows_file(f) for f in files)
-
-def get_pr_files(pr_number, token, repo):
-    """Get files changed in a PR."""
-    import time
-    try:
-        result = subprocess.run(
-            ['curl', '-s',
-             f'https://api.github.com/repos/{repo}/pulls/{pr_number}/files?per_page=100',
-             '-H', 'Accept: application/vnd.github.v3+json',
-             '-H', f'Authorization: Bearer {token}'],
-            capture_output=True,
-            text=True,
-            check=True
-        )
-        data = json.loads(result.stdout)
-        # Check if we hit rate limit
-        if isinstance(data, dict) and 'message' in data:
-            if 'rate limit' in data['message'].lower():
-                return None  # Return None to indicate rate limit
-        time.sleep(0.3)  # Small delay to avoid rate limiting
-        return [f['filename'] for f in data]
-    except Exception as e:
-        return []
-
-# Get GitHub token and repo from environment
-token = sys.argv[1] if len(sys.argv) > 1 else ''
-repo = sys.argv[2] if len(sys.argv) > 2 else 'pytorch/pytorch'
-
-# Load PRs
-prs = []
-with open('prs.json', 'r') as f:
-    for line in f:
-        if line.strip():
-            try:
-                pr_data = json.loads(line)
-                # Skip if it's not a dict (e.g., empty list [])
-                if isinstance(pr_data, dict) and 'number' in pr_data:
-                    prs.append(pr_data)
-            except json.JSONDecodeError as e:
-                pass
-
-# Analyze each PR
-windows_prs = []
-new_windows_prs = []
-updated_windows_prs = []
-merged_windows_prs = []
-all_files = set()
-windows_files = set()
-rate_limit_hit = False
-
-for i, pr in enumerate(prs):
-    pr_number = pr['number']
-    pr_state = pr.get('state', 'open')
-    is_new = pr.get('is_new', False)
-    
-    # Check title first for Windows keywords
-    title_matches = is_windows_pr(pr['title'], [])
-    
-    # Fetch files if not hit rate limit
-    files = []
-    if not rate_limit_hit:
-        files = get_pr_files(pr_number, token, repo)
-        if files is None:  # Rate limit hit
-            rate_limit_hit = True
-            files = []
-        else:
-            all_files.update(files)
-    
-    # Determine if Windows-related (by title or files)
-    if title_matches or is_windows_pr(pr['title'], files):
-        pr['files'] = files
-        pr['windows_files'] = [f for f in files if is_windows_file(f)]
-        windows_prs.append(pr)
-        windows_files.update(pr['windows_files'])
-        
-        if pr_state == 'merged':
-            merged_windows_prs.append(pr)
-        elif is_new:
-            new_windows_prs.append(pr)
-        else:
-            updated_windows_prs.append(pr)
-
-# Generate report
-active_prs = [p for p in prs if p.get('state') != 'merged']
-merged_prs = [p for p in prs if p.get('state') == 'merged']
-
-report = {
-    'total_prs': len(prs),
-    'total_active': len(active_prs),
-    'total_merged': len(merged_prs),
-    'windows_prs': len(windows_prs),
-    'new_prs': len([p for p in active_prs if p.get('is_new', False)]),
-    'updated_prs': len([p for p in active_prs if not p.get('is_new', False)]),
-    'new_windows_prs': len(new_windows_prs),
-    'updated_windows_prs': len(updated_windows_prs),
-    'merged_windows_prs': len(merged_windows_prs),
-    'total_files_changed': len(all_files),
-    'windows_files_changed': len(windows_files),
-    'prs': windows_prs,
-    'new_prs_list': new_windows_prs,
-    'updated_prs_list': updated_windows_prs,
-    'merged_prs_list': merged_windows_prs
-}
-
-with open('analysis_report.json', 'w') as f:
-    json.dump(report, f, indent=2)
-
-# Print summary
-print(f"\n📊 PR ACTIVITY:")
-print(f"  Active PRs: {report['total_active']}")
-print(f"    - Newly created: {report['new_prs']}")
-print(f"    - Recently updated: {report['updated_prs']}")
-print(f"  Merged to main: {report['total_merged']}")
-print(f"\n🪟 WINDOWS-RELATED PRs:")
-print(f"  Total: {len(windows_prs)}")
-print(f"    - New: {len(new_windows_prs)}")
-print(f"    - Updated: {len(updated_windows_prs)}")
-print(f"    - Merged: {len(merged_windows_prs)}")
-print(f"\n📁 FILES AFFECTED:")
-print(f"  Total files changed: {len(all_files)}")
-print(f"  Windows files changed: {len(windows_files)}")
-
-PYTHON_SCRIPT
-            
-            # Run analysis with GitHub token and repo
-            python3 analyze.py "${{ github.token }}" "$REPO"
-            
-            # Read results
-            WINDOWS_PRS=$(jq '.windows_prs' analysis_report.json 2>/dev/null || echo "0")
-            WINDOWS_PRS=$(echo "$WINDOWS_PRS" | tr -d '\n')
-            NEW_WINDOWS_PRS=$(jq '.new_windows_prs' analysis_report.json 2>/dev/null || echo "0")
-            NEW_WINDOWS_PRS=$(echo "$NEW_WINDOWS_PRS" | tr -d '\n')
-            UPDATED_WINDOWS_PRS=$(jq '.updated_windows_prs' analysis_report.json 2>/dev/null || echo "0")
-            UPDATED_WINDOWS_PRS=$(echo "$UPDATED_WINDOWS_PRS" | tr -d '\n')
-            MERGED_WINDOWS_PRS=$(jq '.merged_windows_prs' analysis_report.json 2>/dev/null || echo "0")
-            MERGED_WINDOWS_PRS=$(echo "$MERGED_WINDOWS_PRS" | tr -d '\n')
-            TOTAL_FILES=$(jq '.total_files_changed' analysis_report.json 2>/dev/null || echo "0")
-            TOTAL_FILES=$(echo "$TOTAL_FILES" | tr -d '\n')
-            WINDOWS_FILES=$(jq '.windows_files_changed' analysis_report.json 2>/dev/null || echo "0")
-            WINDOWS_FILES=$(echo "$WINDOWS_FILES" | tr -d '\n')
-            
-            # Add to workflow summary for this date (BEFORE moving to next date)
-            echo "## 📅 $current_date" >> $GITHUB_STEP_SUMMARY
-            echo "" >> $GITHUB_STEP_SUMMARY
-            echo "| Metric | Count |" >> $GITHUB_STEP_SUMMARY
-            echo "|--------|-------|" >> $GITHUB_STEP_SUMMARY
-            echo "| Total PRs | $TOTAL_PRS |" >> $GITHUB_STEP_SUMMARY
-            echo "| Active PRs | $TOTAL_ACTIVE |" >> $GITHUB_STEP_SUMMARY
-            echo "| - New | $NEW_PRS |" >> $GITHUB_STEP_SUMMARY
-            echo "| - Updated | $UPDATED_PRS |" >> $GITHUB_STEP_SUMMARY
-            echo "| Merged PRs | $TOTAL_MERGED |" >> $GITHUB_STEP_SUMMARY
-            echo "| **Windows PRs** | **$WINDOWS_PRS** |" >> $GITHUB_STEP_SUMMARY
-            echo "| - New Windows | $NEW_WINDOWS_PRS |" >> $GITHUB_STEP_SUMMARY
-            echo "| - Updated Windows | $UPDATED_WINDOWS_PRS |" >> $GITHUB_STEP_SUMMARY
-            echo "| - Merged Windows | $MERGED_WINDOWS_PRS |" >> $GITHUB_STEP_SUMMARY
-            echo "| Total Files Changed | $TOTAL_FILES |" >> $GITHUB_STEP_SUMMARY
-            echo "| Windows Files Changed | $WINDOWS_FILES |" >> $GITHUB_STEP_SUMMARY
-            echo "" >> $GITHUB_STEP_SUMMARY
-            echo "---" >> $GITHUB_STEP_SUMMARY
-            echo "" >> $GITHUB_STEP_SUMMARY
-            
-            echo ""
-            echo "=========================================="
-            echo ""
-            
-            # Move to next date
-            current_date=$(date -u -d "$current_date + 1 day" '+%Y-%m-%d')
+              | jq -c --arg since "$SINCE" --arg until "$UNTIL" 'select(.merged_at != null and .merged_at >= $since and .merged_at <= $until) | {number: .number, title: .title, author: .user.login, created_at: .created_at, merged_at: .merged_at, state: "merged"}' \
+              >> merged_prs.json || true
           done
           
+          # Ensure file exists even if empty
+          touch merged_prs.json
+          
+          # Debug: Show merge activity
+          TOTAL_MERGED_SEARCH=$(jq 'length' merged_search_all.json 2>/dev/null || echo "0")
+          TOTAL_MERGED_IN_WINDOW=$(grep -c '^{' merged_prs.json 2>/dev/null || echo "0")
+          # Remove any newlines from variables
+          TOTAL_MERGED_SEARCH=$(echo "$TOTAL_MERGED_SEARCH" | tr -d '\n')
+          TOTAL_MERGED_IN_WINDOW=$(echo "$TOTAL_MERGED_IN_WINDOW" | tr -d '\n')
+          echo "Debug: Found $TOTAL_MERGED_SEARCH merged PRs from search, $TOTAL_MERGED_IN_WINDOW in exact time window"
+          
+          # Show the first few merged PRs for reference
+          echo "Merged PRs found (sample):"
+          jq -r 'select(.merged_at != null) | "  - PR #\(.number) merged at \(.merged_at)"' merged_prs.json | head -3 || echo "  (none yet)"
+          
+          # Combine active and merged PRs
+          cat active_prs.json merged_prs.json > prs.json
+          
+          # Count PRs (count non-empty lines with proper handling of empty files)
+          TOTAL_ACTIVE=$(grep -c '^{' active_prs.json 2>/dev/null || echo "0")
+          TOTAL_ACTIVE=$(echo "$TOTAL_ACTIVE" | tr -d '\n')
+          NEW_PRS=$(jq -s '[.[] | select(.is_new == true)] | length' active_prs.json 2>/dev/null || echo "0")
+          NEW_PRS=$(echo "$NEW_PRS" | tr -d '\n')
+          UPDATED_PRS=$(jq -s '[.[] | select(.is_new == false)] | length' active_prs.json 2>/dev/null || echo "0")
+          UPDATED_PRS=$(echo "$UPDATED_PRS" | tr -d '\n')
+          TOTAL_MERGED=$(grep -c '^{' merged_prs.json 2>/dev/null || echo "0")
+          TOTAL_MERGED=$(echo "$TOTAL_MERGED" | tr -d '\n')
+          TOTAL_PRS=$(grep -c '^{' prs.json 2>/dev/null || echo "0")
+          TOTAL_PRS=$(echo "$TOTAL_PRS" | tr -d '\n')
+          
+          echo "total_prs=$TOTAL_PRS" >> $GITHUB_OUTPUT
+          echo "total_active=$TOTAL_ACTIVE" >> $GITHUB_OUTPUT
+          echo "new_prs=$NEW_PRS" >> $GITHUB_OUTPUT
+          echo "updated_prs=$UPDATED_PRS" >> $GITHUB_OUTPUT
+          echo "total_merged=$TOTAL_MERGED" >> $GITHUB_OUTPUT
+          echo "Found $TOTAL_ACTIVE active PRs: $NEW_PRS newly created, $UPDATED_PRS recently updated"
+          echo "Found $TOTAL_MERGED merged PRs"
+          
+          # Create Python analysis script inline
+          cat > analyze.py << 'PYTHON_SCRIPT'
+          import json
+          import sys
+          import subprocess
+          
+          # Windows-related patterns
+          WINDOWS_PATTERNS = [
+              # Explicit Windows paths
+              'windows/', 'win-', '.bat', '.ps1', 'msvc', 'visual_studio',
+              'windows-pull', 'windows-binary', '_win-build', 'win-test',
+              'build_pytorch.bat', 'mingw', '.ci/pytorch/windows/',
+              
+              # Core build files (affect Windows compilation)
+              'cmakelists.txt', 'setup.py', 'pyproject.toml',
+              'cmake/', 'tools/build_pytorch_libs.py',
+              
+              # C10 core and utilities
+              'c10/core/', 'c10/cuda/', 'c10/util/',
+              
+              # ATen core dispatch and device management
+              'aten/src/aten/core/', 'aten/src/aten/native/dispatchstub',
+              'aten/src/aten/native/cpufallback', 'aten/src/aten/dispatch',
+              'aten/src/aten/context', 'aten/src/aten/device',
+              'aten/src/aten/deviceguard',
+              
+              # Torch CSRC - Python bindings and JIT
+              'torch/csrc/cuda/', 'torch/csrc/jit/codegen/cuda/',
+              'torch/csrc/autograd/engine/', 'torch/csrc/distributed/c10d/',
+              
+              # ATen CUDA implementations
+              'aten/src/aten/cuda/', 'aten/src/aten/native/cuda/',
+              'aten/src/aten/native/cudnn/', 'aten/src/aten/cudnn/',
+              
+              # Third-party GPU dependencies
+              'third_party/cudnn/', 'third_party/cutlass/',
+              'third_party/fbgemm/', 'third_party/onnx/',
+              
+              # ATen build configuration
+              'aten/cmakelists.txt', 'aten/src/aten/cmakelists.txt',
+              'aten/src/aten/cuda/cudaconfig.h',
+              
+              # FuncTorch (affects GPU compilation)
+              'functorch/src/',
+              
+              # Memory management
+              'aten/src/aten/native/memory.cpp', 'c10/core/allocator'
+          ]
+          
+          WINDOWS_KEYWORDS = [
+              'windows', 'win32', 'msvc', 'visual studio', 'mingw', '.bat',
+              'winbuild', 'vcpkg'
+          ]
+          
+          def is_windows_file(filepath):
+              """Check if file is Windows-related."""
+              filepath_lower = filepath.lower()
+              
+              for pattern in WINDOWS_PATTERNS:
+                  if pattern in filepath_lower:
+                      return True
+              
+              if filepath_lower.endswith(('.bat', '.ps1')):
+                  return True
+              
+              path_parts = filepath_lower.split('/')
+              if 'windows' in path_parts or 'win' in path_parts:
+                  return True
+              
+              return False
+          
+          def is_windows_pr(title, files):
+              """Check if PR is Windows-related."""
+              title_lower = title.lower()
+              
+              # Check title
+              if any(keyword in title_lower for keyword in WINDOWS_KEYWORDS):
+                  return True
+              
+              # Check files
+              return any(is_windows_file(f) for f in files)
+          
+          def get_pr_files(pr_number):
+              """Get files changed in a PR."""
+              try:
+                  result = subprocess.run(
+                      ['curl', '-s',
+                       f'https://api.github.com/repos/pytorch/pytorch/pulls/{pr_number}/files?per_page=100',
+                       '-H', 'Accept: application/vnd.github.v3+json'],
+                      capture_output=True,
+                      text=True,
+                      check=True
+                  )
+                  data = json.loads(result.stdout)
+                  # Check if we hit rate limit
+                  if isinstance(data, dict) and 'message' in data:
+                      if 'rate limit' in data['message'].lower():
+                          print(f"Rate limit hit when fetching PR #{pr_number}", file=sys.stderr)
+                          return None  # Return None to indicate rate limit
+                  return [f['filename'] for f in data]
+              except Exception as e:
+                  print(f"Error fetching files for PR #{pr_number}: {e}", file=sys.stderr)
+                  return []
+          
+          # Load PRs
+          prs = []
+          with open('prs.json', 'r') as f:
+              for line in f:
+                  if line.strip():
+                      try:
+                          pr_data = json.loads(line)
+                          # Skip if it's not a dict (e.g., empty list [])
+                          if isinstance(pr_data, dict) and 'number' in pr_data:
+                              prs.append(pr_data)
+                      except json.JSONDecodeError as e:
+                          print(f"Warning: Skipping malformed JSON line: {e}", file=sys.stderr)
+          
+          print(f"Analyzing {len(prs)} PRs...", file=sys.stderr)
+          
+          # Analyze each PR
+          windows_prs = []
+          new_windows_prs = []
+          updated_windows_prs = []
+          merged_windows_prs = []
+          all_files = set()
+          windows_files = set()
+          rate_limit_hit = False
+          
+          for i, pr in enumerate(prs):
+              pr_number = pr['number']
+              pr_state = pr.get('state', 'open')
+              is_new = pr.get('is_new', False)
+              
+              status_label = 'MERGED' if pr_state == 'merged' else ('NEW' if is_new else 'UPDATED')
+              print(f"Analyzing PR {i+1}/{len(prs)}: #{pr_number} ({status_label})...", file=sys.stderr)
+              
+              # Check title first for Windows keywords
+              title_matches = is_windows_pr(pr['title'], [])
+              
+              # Fetch files if not hit rate limit
+              files = []
+              if not rate_limit_hit:
+                  files = get_pr_files(pr_number)
+                  if files is None:  # Rate limit hit
+                      rate_limit_hit = True
+                      print(f"Rate limit reached. Analyzing remaining PRs by title only.", file=sys.stderr)
+                      files = []
+                  else:
+                      all_files.update(files)
+              
+              # Determine if Windows-related (by title or files)
+              if title_matches or is_windows_pr(pr['title'], files):
+                  pr['files'] = files
+                  pr['windows_files'] = [f for f in files if is_windows_file(f)]
+                  windows_prs.append(pr)
+                  windows_files.update(pr['windows_files'])
+                  
+                  if pr_state == 'merged':
+                      merged_windows_prs.append(pr)
+                  elif is_new:
+                      new_windows_prs.append(pr)
+                  else:
+                      updated_windows_prs.append(pr)
+          
+          # Generate report
+          active_prs = [p for p in prs if p.get('state') != 'merged']
+          merged_prs = [p for p in prs if p.get('state') == 'merged']
+          
+          report = {
+              'total_prs': len(prs),
+              'total_active': len(active_prs),
+              'total_merged': len(merged_prs),
+              'windows_prs': len(windows_prs),
+              'new_prs': len([p for p in active_prs if p.get('is_new', False)]),
+              'updated_prs': len([p for p in active_prs if not p.get('is_new', False)]),
+              'new_windows_prs': len(new_windows_prs),
+              'updated_windows_prs': len(updated_windows_prs),
+              'merged_windows_prs': len(merged_windows_prs),
+              'total_files_changed': len(all_files),
+              'windows_files_changed': len(windows_files),
+              'prs': windows_prs,
+              'new_prs_list': new_windows_prs,
+              'updated_prs_list': updated_windows_prs,
+              'merged_prs_list': merged_windows_prs
+          }
+          
+          with open('analysis_report.json', 'w') as f:
+              json.dump(report, f, indent=2)
+          
+          # Print summary
+          print(f"\n=== PR ACTIVITY (LAST 24H) ===")
+          print(f"Active PRs: {report['total_active']}")
+          print(f"  - Newly created: {report['new_prs']}")
+          print(f"  - Recently updated: {report['updated_prs']}")
+          print(f"Merged PRs: {report['total_merged']}")
+          print(f"\n=== WINDOWS-RELATED PRs ===")
+          print(f"Total Windows PRs: {len(windows_prs)}")
+          print(f"  - New: {len(new_windows_prs)}")
+          print(f"  - Updated: {len(updated_windows_prs)}")
+          print(f"  - Merged: {len(merged_windows_prs)}")
+          print(f"\n=== FILES ===")
+          print(f"Total files changed: {len(all_files)}")
+          print(f"Windows files changed: {len(windows_files)}")
+          
+          PYTHON_SCRIPT
+          
+          # Run analysis
+          python3 analyze.py
+          
+          # Read results and clean newlines
+          WINDOWS_PRS=$(jq '.windows_prs' analysis_report.json 2>/dev/null || echo "0")
+          WINDOWS_PRS=$(echo "$WINDOWS_PRS" | tr -d '\n')
+          NEW_WINDOWS_PRS=$(jq '.new_windows_prs' analysis_report.json 2>/dev/null || echo "0")
+          NEW_WINDOWS_PRS=$(echo "$NEW_WINDOWS_PRS" | tr -d '\n')
+          UPDATED_WINDOWS_PRS=$(jq '.updated_windows_prs' analysis_report.json 2>/dev/null || echo "0")
+          UPDATED_WINDOWS_PRS=$(echo "$UPDATED_WINDOWS_PRS" | tr -d '\n')
+          MERGED_WINDOWS_PRS=$(jq '.merged_windows_prs' analysis_report.json 2>/dev/null || echo "0")
+          MERGED_WINDOWS_PRS=$(echo "$MERGED_WINDOWS_PRS" | tr -d '\n')
+          TOTAL_FILES=$(jq '.total_files_changed' analysis_report.json 2>/dev/null || echo "0")
+          TOTAL_FILES=$(echo "$TOTAL_FILES" | tr -d '\n')
+          WINDOWS_FILES=$(jq '.windows_files_changed' analysis_report.json 2>/dev/null || echo "0")
+          WINDOWS_FILES=$(echo "$WINDOWS_FILES" | tr -d '\n')
+          
+          echo "windows_prs=$WINDOWS_PRS" >> $GITHUB_OUTPUT
+          echo "new_windows_prs=$NEW_WINDOWS_PRS" >> $GITHUB_OUTPUT
+          echo "updated_windows_prs=$UPDATED_WINDOWS_PRS" >> $GITHUB_OUTPUT
+          echo "merged_windows_prs=$MERGED_WINDOWS_PRS" >> $GITHUB_OUTPUT
+          echo "total_files=$TOTAL_FILES" >> $GITHUB_OUTPUT
+          echo "windows_files=$WINDOWS_FILES" >> $GITHUB_OUTPUT
+      
+      - name: Generate detailed report
+        run: |
+          cat > detailed_report.md << 'EOF'
+          # Windows PR Activity Report
+          
+          **Analyzing Date:** ${{ steps.time.outputs.start_date }}  
+          **Time Range:** ${{ steps.time.outputs.start_date }} 00:00:00 UTC → ${{ steps.time.outputs.now }} (24 hours)
+          
+          ---
+          
+          ## 📊 Summary
+          
+          ### PR Activity on ${{ steps.time.outputs.start_date }}
+          
+          | Metric | Count | Percentage |
+          |--------|-------|------------|
+          | Total PRs | ${{ steps.analyze.outputs.total_prs }} | 100% |
+          | Windows-Related PRs | ${{ steps.analyze.outputs.windows_prs }} | $(awk "BEGIN {printf \"%.1f\", (${{ steps.analyze.outputs.windows_prs }} / ${{ steps.analyze.outputs.total_prs }}) * 100}")% |
+          
+          ### Breakdown by Activity Type
+          
+          | Type | Total | Windows-Related |
+          |------|-------|-----------------|
+          | **Active PRs** | ${{ steps.analyze.outputs.total_active }} | |
+          | ↳ Newly Created | ${{ steps.analyze.outputs.new_prs }} | ${{ steps.analyze.outputs.new_windows_prs }} |
+          | ↳ Recently Updated | ${{ steps.analyze.outputs.updated_prs }} | ${{ steps.analyze.outputs.updated_windows_prs }} |
+          | **Merged to Main** | ${{ steps.analyze.outputs.total_merged }} | ${{ steps.analyze.outputs.merged_windows_prs }} |
+          
+          ### Files Changed
+          
+          | Metric | Count |
+          |--------|-------|
+          | Total Files Changed | ${{ steps.analyze.outputs.total_files }} |
+          | Windows-Related Files | ${{ steps.analyze.outputs.windows_files }} |
+          
+          ---
+          
+          ## 🆕 Newly Created Windows PRs
+          
+          EOF
+          
+          # Add new PR details
+          jq -r '.new_prs_list[] | "### PR #\(.number): \(.title)\n\n**Author:** \(.author)  \n**Created:** \(.created_at)  \n**Last Updated:** \(.updated_at)  \n**Status:** 🆕 NEW\n\n**Total Files Changed:** \(.files | length)\n\n**Windows-Related Files (\(.windows_files | length)):**\n\(if (.windows_files | length) > 0 then (.windows_files | map("- `\(.)`") | join("\n")) else "- (No Windows-specific files detected, but PR title indicates Windows changes)" end)\n\n**All Files:**\n<details>\n<summary>Click to expand all files</summary>\n\n\(.files | map("- `\(.)`") | join("\n"))\n\n</details>\n\n**PR Link:** https://github.com/pytorch/pytorch/pull/\(.number)\n\n---\n\n"' analysis_report.json >> detailed_report.md || true
+          
+          # Add Recently Updated PRs section
+          echo "" >> detailed_report.md
+          echo "## 🔄 Recently Updated Windows PRs" >> detailed_report.md
+          echo "" >> detailed_report.md
+          
+          # Add updated PR details
+          jq -r '.updated_prs_list[] | "### PR #\(.number): \(.title)\n\n**Author:** \(.author)  \n**Created:** \(.created_at)  \n**Last Updated:** \(.updated_at)  \n**Status:** 🔄 UPDATED\n\n**Total Files Changed:** \(.files | length)\n\n**Windows-Related Files (\(.windows_files | length)):**\n\(if (.windows_files | length) > 0 then (.windows_files | map("- `\(.)`") | join("\n")) else "- (No Windows-specific files detected, but PR title indicates Windows changes)" end)\n\n**All Files:**\n<details>\n<summary>Click to expand all files</summary>\n\n\(.files | map("- `\(.)`") | join("\n"))\n\n</details>\n\n**PR Link:** https://github.com/pytorch/pytorch/pull/\(.number)\n\n---\n\n"' analysis_report.json >> detailed_report.md || true
+          
+          # Add Merged PRs section
+          echo "" >> detailed_report.md
+          echo "## ✅ Windows PRs Merged to Main" >> detailed_report.md
+          echo "" >> detailed_report.md
+          
+          # Check if there are any merged PRs
+          MERGED_COUNT=$(jq '.merged_prs_list | length' analysis_report.json)
+          if [ "$MERGED_COUNT" -eq 0 ]; then
+            echo "*No Windows-related PRs were merged to main in the last ${{ steps.time.outputs.hours }} hours.*" >> detailed_report.md
+            echo "" >> detailed_report.md
+            echo "This is normal during quieter periods. The workflow is working correctly and will show merged PRs when they occur." >> detailed_report.md
+          else
+            # Add merged PR details
+            jq -r '.merged_prs_list[] | "### PR #\(.number): \(.title)\n\n**Author:** \(.author)  \n**Created:** \(.created_at)  \n**Merged:** \(.merged_at)  \n**Status:** ✅ MERGED\n\n**Total Files Changed:** \(.files | length)\n\n**Windows-Related Files (\(.windows_files | length)):**\n\(if (.windows_files | length) > 0 then (.windows_files | map("- `\(.)`") | join("\n")) else "- (No Windows-specific files detected, but PR title indicates Windows changes)" end)\n\n**All Files:**\n<details>\n<summary>Click to expand all files</summary>\n\n\(.files | map("- `\(.)`") | join("\n"))\n\n</details>\n\n**PR Link:** https://github.com/pytorch/pytorch/pull/\(.number)\n\n---\n\n"' analysis_report.json >> detailed_report.md || true
+          fi
+          
+          echo "Report generated successfully"
+      
+      - name: Create workflow summary
+        run: |
+          cat detailed_report.md >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "---" >> $GITHUB_STEP_SUMMARY
+          echo "*Note: Full reports are displayed above. JSON report is available in the workflow logs.*" >> $GITHUB_STEP_SUMMARY
+      
+      # Artifact uploads disabled due to storage quota limits
+      # Reports are available in the workflow summary and logs instead
+      
+      - name: Save JSON report to logs
+        run: |
+          echo "=========================================="
+          echo "JSON Report (for archival/processing):"
+          echo "=========================================="
+          cat analysis_report.json
+      
+      - name: Print summary
+        run: |
+          echo "=========================================="
+          echo "Windows PR Activity Report"
+          echo "=========================================="
+          echo ""
+          echo "📅 ANALYZING DATE: ${{ steps.time.outputs.start_date }}"
+          echo "⏰ TIME RANGE: ${{ steps.time.outputs.start_date }} 00:00 → ${{ steps.time.outputs.now }}"
+          echo ""
+          echo "📊 PR ACTIVITY:"
+          echo "  Active PRs: ${{ steps.analyze.outputs.total_active }}"
+          echo "    - Newly created: ${{ steps.analyze.outputs.new_prs }}"
+          echo "    - Recently updated: ${{ steps.analyze.outputs.updated_prs }}"
+          echo "  Merged to main: ${{ steps.analyze.outputs.total_merged }}"
+          echo ""
+          echo "🪟 WINDOWS-RELATED PRs:"
+          echo "  Total: ${{ steps.analyze.outputs.windows_prs }}"
+          echo "    - New: ${{ steps.analyze.outputs.new_windows_prs }}"
+          echo "    - Updated: ${{ steps.analyze.outputs.updated_windows_prs }}"
+          echo "    - Merged: ${{ steps.analyze.outputs.merged_windows_prs }}"
+          echo ""
+          echo "📁 FILES AFFECTED:"
+          echo "  Total files changed: ${{ steps.analyze.outputs.total_files }}"
+          echo "  Windows files changed: ${{ steps.analyze.outputs.windows_files }}"
           echo ""
           echo "=========================================="
-          echo "✅ ANALYSIS COMPLETE"
-          echo "=========================================="
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "# ✅ Analysis Complete" >> $GITHUB_STEP_SUMMARY
-          echo "Analyzed dates: $START_DATE to $END_DATE" >> $GITHUB_STEP_SUMMARY
