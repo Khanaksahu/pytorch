@@ -1,14 +1,6 @@
-name: Monitor Windows PR Activity 
+name: Monitor Windows PR Activity
 
 on:
-  # Trigger on any push (for testing)
-  push:
-  
-  # Run every 24 hours at 23:00 UTC
-  schedule:
-    - cron: '0 23 * * *'
-  
-  # Allow manual trigger (use this to test immediately!)
   workflow_dispatch:
     inputs:
       start_date:
@@ -23,6 +15,12 @@ on:
         description: 'Repository owner (e.g., pytorch or your-username)'
         required: false
         default: 'pytorch'
+  schedule:
+    - cron: '28 19 * * *'  # Runs at 19:30 UTC (in ~4 minutes for testing)
+  push:
+    branches:
+      - main
+      - master
 
 permissions:
   contents: read
@@ -365,9 +363,32 @@ PYTHON_SCRIPT
             
             # Move to next date
             current_date=$(date -u -d "$current_date + 1 day" '+%Y-%m-%d')
+            
+            # Add to workflow summary for this date
+            echo "## 📅 $current_date" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "| Metric | Count |" >> $GITHUB_STEP_SUMMARY
+            echo "|--------|-------|" >> $GITHUB_STEP_SUMMARY
+            echo "| Total PRs | $TOTAL_PRS |" >> $GITHUB_STEP_SUMMARY
+            echo "| Active PRs | $TOTAL_ACTIVE |" >> $GITHUB_STEP_SUMMARY
+            echo "| - New | $NEW_PRS |" >> $GITHUB_STEP_SUMMARY
+            echo "| - Updated | $UPDATED_PRS |" >> $GITHUB_STEP_SUMMARY
+            echo "| Merged PRs | $TOTAL_MERGED |" >> $GITHUB_STEP_SUMMARY
+            echo "| **Windows PRs** | **$WINDOWS_PRS** |" >> $GITHUB_STEP_SUMMARY
+            echo "| - New Windows | $NEW_WINDOWS_PRS |" >> $GITHUB_STEP_SUMMARY
+            echo "| - Updated Windows | $UPDATED_WINDOWS_PRS |" >> $GITHUB_STEP_SUMMARY
+            echo "| - Merged Windows | $MERGED_WINDOWS_PRS |" >> $GITHUB_STEP_SUMMARY
+            echo "| Total Files Changed | $TOTAL_FILES |" >> $GITHUB_STEP_SUMMARY
+            echo "| Windows Files Changed | $WINDOWS_FILES |" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "---" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
           done
           
           echo ""
           echo "=========================================="
           echo "✅ ANALYSIS COMPLETE"
           echo "=========================================="
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "# ✅ Analysis Complete" >> $GITHUB_STEP_SUMMARY
+          echo "Analyzed dates: $START_DATE to $END_DATE" >> $GITHUB_STEP_SUMMARY
