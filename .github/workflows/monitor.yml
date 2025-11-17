@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       start_date:
-        description: 'Start date (YYYY-MM-DD)' 
+        description: 'Start date (YYYY-MM-DD)'
         required: false
         default: '2024-11-05'
       end_date:
@@ -357,6 +357,26 @@ PYTHON_SCRIPT
             WINDOWS_FILES=$(jq '.windows_files_changed' analysis_report.json 2>/dev/null || echo "0")
             WINDOWS_FILES=$(echo "$WINDOWS_FILES" | tr -d '\n')
             
+            # Add to workflow summary for this date (BEFORE moving to next date)
+            echo "## 📅 $current_date" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "| Metric | Count |" >> $GITHUB_STEP_SUMMARY
+            echo "|--------|-------|" >> $GITHUB_STEP_SUMMARY
+            echo "| Total PRs | $TOTAL_PRS |" >> $GITHUB_STEP_SUMMARY
+            echo "| Active PRs | $TOTAL_ACTIVE |" >> $GITHUB_STEP_SUMMARY
+            echo "| - New | $NEW_PRS |" >> $GITHUB_STEP_SUMMARY
+            echo "| - Updated | $UPDATED_PRS |" >> $GITHUB_STEP_SUMMARY
+            echo "| Merged PRs | $TOTAL_MERGED |" >> $GITHUB_STEP_SUMMARY
+            echo "| **Windows PRs** | **$WINDOWS_PRS** |" >> $GITHUB_STEP_SUMMARY
+            echo "| - New Windows | $NEW_WINDOWS_PRS |" >> $GITHUB_STEP_SUMMARY
+            echo "| - Updated Windows | $UPDATED_WINDOWS_PRS |" >> $GITHUB_STEP_SUMMARY
+            echo "| - Merged Windows | $MERGED_WINDOWS_PRS |" >> $GITHUB_STEP_SUMMARY
+            echo "| Total Files Changed | $TOTAL_FILES |" >> $GITHUB_STEP_SUMMARY
+            echo "| Windows Files Changed | $WINDOWS_FILES |" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "---" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            
             echo ""
             echo "=========================================="
             echo ""
@@ -369,3 +389,6 @@ PYTHON_SCRIPT
           echo "=========================================="
           echo "✅ ANALYSIS COMPLETE"
           echo "=========================================="
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "# ✅ Analysis Complete" >> $GITHUB_STEP_SUMMARY
+          echo "Analyzed dates: $START_DATE to $END_DATE" >> $GITHUB_STEP_SUMMARY
