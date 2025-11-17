@@ -1556,6 +1556,44 @@ def unfuse_bias_add_to_pointwise(match: Match, mat1, mat2, *, inp, alpha, beta):
     match.replace_by_example(repl, [inp, mat1, mat2, alpha, beta])
 
 
+def is_valid_addmm_activation_fusion(match: Match) -> bool:
+    if not is_gpu(match.kwargs["inp"].meta["val"].device.type):
+        return False
+
+    # Only beta == 1 so far implies activation epilogue in addmm
+    if match.kwargs["beta"] not in (1, 1.0, 1 + 0j, 1 - 0j):
+        return False
+
+    return not has_uses_tagged_as(
+        match.output_node(),
+        (torch.Tag.pointwise, torch.Tag.reduction),
+    )
+
+
+@register_graph_pattern(
+    CallFunction(
+        aten.relu,
+        CallFunction(
+            aten.addmm,
+            KeywordArg("inp"),
+            Arg(),
+            Arg(),
+            beta=KeywordArg("beta"),
+            alpha=KeywordArg("alpha"),
+        ),
+    ),
+    # pyrefly: ignore [bad-argument-type]
+    pass_dict=pass_patterns[1],
+    extra_check=is_valid_addmm_activation_fusion,
+)
+def relu_addmm_fusion(match: Match, mat1, mat2, *, inp, beta, alpha):
+    def replacement(inp, mat1, mat2, beta, alpha):
+        return aten._addmm_activation(inp, mat1, mat2, beta=beta, alpha=alpha)
+
+    # pyrefly: ignore [bad-argument-type]
+    match.replace_by_example(replacement, [inp, mat1, mat2, beta, alpha])
+
+
 def is_valid_addmm_fusion(match):
     mat1, mat2 = match.args
     inp = match.kwargs["inp"]
