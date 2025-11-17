@@ -13,103 +13,81 @@ jobs:
     runs-on: ubuntu-latest
     
     steps:
-      - name: Get time range
-        id: time
+      - name: Analyze PRs for date
         run: |
+          # Set the date to analyze
           START_DATE="2024-11-05"
-          SINCE="${START_DATE}T00:00:00Z"
-          END_EPOCH=$(date -u -d "$START_DATE + 1 day" '+%s')
-          NOW=$(date -u -d "$START_DATE + 1 day" '+%Y-%m-%dT%H:%M:%SZ')
-          NOW_DISPLAY=$(date -u -d "$START_DATE + 1 day" '+%Y-%m-%d %H:%M:%S UTC')
-          HOURS="24"
-          echo "start_date=$START_DATE" >> $GITHUB_OUTPUT
-          echo "since=$SINCE" >> $GITHUB_OUTPUT
-          echo "now=$NOW_DISPLAY" >> $GITHUB_OUTPUT
-          echo "hours=$HOURS" >> $GITHUB_OUTPUT
-          echo "Analyzing 24 hours: $START_DATE 00:00:00 to $NOW_DISPLAY"
-      
-      - name: Fetch and analyze PRs
-        id: analyze
-        run: |
-          SINCE="${{ steps.time.outputs.since }}"
-          UNTIL=$(date -u -d "${{ steps.time.outputs.now }}" '+%Y-%m-%dT%H:%M:%SZ')
           REPO="${{ github.repository }}"
           
-          echo "Searching for PRs updated on ${{ steps.time.outputs.start_date }}..."
-          SEARCH_DATE="${{ steps.time.outputs.start_date }}"
+          echo "=========================================="
+          echo "Windows PR Activity Report"
+          echo "Repository: $REPO"
+          echo "Date: $START_DATE"
+          echo "=========================================="
           
-          echo "Fetching open PRs updated on $SEARCH_DATE..."
-          curl -s "https://api.github.com/search/issues?q=repo:$REPO+is:pr+is:open+base:main+updated:$SEARCH_DATE&per_page=100&page=1" \
+          # Fetch open PRs
+          echo "Fetching open PRs..."
+          curl -s "https://api.github.com/search/issues?q=repo:$REPO+is:pr+is:open+updated:$START_DATE&per_page=100" \
             -H "Accept: application/vnd.github.v3+json" \
-            -H "Authorization: Bearer ${{ github.token }}" \
-            | jq '.items' > open_prs_page1.json
+            -H "Authorization: Bearer ${{ github.token }}" > open_prs.json
           
-          curl -s "https://api.github.com/search/issues?q=repo:$REPO+is:pr+is:open+base:main+updated:$SEARCH_DATE&per_page=100&page=2" \
+          # Fetch merged PRs  
+          echo "Fetching merged PRs..."
+          curl -s "https://api.github.com/search/issues?q=repo:$REPO+is:pr+is:merged+merged:$START_DATE&per_page=100" \
             -H "Accept: application/vnd.github.v3+json" \
-            -H "Authorization: Bearer ${{ github.token }}" \
-            | jq '.items' > open_prs_page2.json
+            -H "Authorization: Bearer ${{ github.token }}" > merged_prs.json
           
-          jq -s 'add' open_prs_page1.json open_prs_page2.json > open_prs_all.json
-          jq -c --arg since "$SINCE" --arg until "$UNTIL" '.[] | select(.updated_at >= $since and .updated_at <= $until) | {number: .number, title: .title, author: .user.login, created_at: .created_at, updated_at: .updated_at, state: "open", is_new: (.created_at >= $since)}' open_prs_all.json > active_prs.json
+          # Count PRs
+          TOTAL_OPEN=$(jq '.total_count' open_prs.json 2>/dev/null || echo "0")
+          TOTAL_MERGED=$(jq '.total_count' merged_prs.json 2>/dev/null || echo "0")
+          TOTAL_PRS=$((TOTAL_OPEN + TOTAL_MERGED))
           
-          echo "Fetching merged PRs on $SEARCH_DATE..."
-          curl -s "https://api.github.com/search/issues?q=repo:$REPO+is:pr+is:merged+base:main+merged:$SEARCH_DATE&per_page=100&page=1" \
-            -H "Accept: application/vnd.github.v3+json" \
-            -H "Authorization: Bearer ${{ github.token }}" \
-            | jq '.items' > merged_search_page1.json
+          echo "Total Open PRs: $TOTAL_OPEN"
+          echo "Total Merged PRs: $TOTAL_MERGED"
+          echo "Total PRs: $TOTAL_PRS"
           
-          curl -s "https://api.github.com/search/issues?q=repo:$REPO+is:pr+is:merged+base:main+merged:$SEARCH_DATE&per_page=100&page=2" \
-            -H "Accept: application/vnd.github.v3+json" \
-            -H "Authorization: Bearer ${{ github.token }}" \
-            | jq '.items' > merged_search_page2.json
+          # Count Windows-related PRs by title keywords
+          WINDOWS_OPEN=$(jq '[.items[] | select(.title | ascii_downcase | test("windows|win32|msvc|mingw|\\.bat"))] | length' open_prs.json 2>/dev/null || echo "0")
+          WINDOWS_MERGED=$(jq '[.items[] | select(.title | ascii_downcase | test("windows|win32|msvc|mingw|\\.bat"))] | length' merged_prs.json 2>/dev/null || echo "0")
+          WINDOWS_TOTAL=$((WINDOWS_OPEN + WINDOWS_MERGED))
           
-          jq -s 'add' merged_search_page1.json merged_search_page2.json > merged_search_all.json
+          echo "Windows Open PRs: $WINDOWS_OPEN"
+          echo "Windows Merged PRs: $WINDOWS_MERGED"
+          echo "Windows Total PRs: $WINDOWS_TOTAL"
           
-          > merged_prs.json
-          for pr_num in $(jq -r '.[].number' merged_search_all.json 2>/dev/null | head -20); do
-            curl -s "https://api.github.com/repos/$REPO/pulls/$pr_num" \
-              -H "Accept: application/vnd.github.v3+json" \
-              -H "Authorization: Bearer ${{ github.token }}" \
-              | jq -c --arg since "$SINCE" --arg until "$UNTIL" 'select(.merged_at != null and .merged_at >= $since and .merged_at <= $until) | {number: .number, title: .title, author: .user.login, created_at: .created_at, merged_at: .merged_at, state: "merged"}' \
-              >> merged_prs.json || true
-          done
-          
-          touch merged_prs.json
-          cat active_prs.json merged_prs.json > prs.json
-          
-          TOTAL_ACTIVE=$(grep -c '^{' active_prs.json 2>/dev/null || echo "0")
-          TOTAL_ACTIVE=$(echo "$TOTAL_ACTIVE" | tr -d '\n')
-          NEW_PRS=$(jq -s '[.[] | select(.is_new == true)] | length' active_prs.json 2>/dev/null || echo "0")
-          NEW_PRS=$(echo "$NEW_PRS" | tr -d '\n')
-          UPDATED_PRS=$(jq -s '[.[] | select(.is_new == false)] | length' active_prs.json 2>/dev/null || echo "0")
-          UPDATED_PRS=$(echo "$UPDATED_PRS" | tr -d '\n')
-          TOTAL_MERGED=$(grep -c '^{' merged_prs.json 2>/dev/null || echo "0")
-          TOTAL_MERGED=$(echo "$TOTAL_MERGED" | tr -d '\n')
-          TOTAL_PRS=$(grep -c '^{' prs.json 2>/dev/null || echo "0")
-          TOTAL_PRS=$(echo "$TOTAL_PRS" | tr -d '\n')
-          
-          echo "total_prs=$TOTAL_PRS" >> $GITHUB_OUTPUT
-          echo "total_active=$TOTAL_ACTIVE" >> $GITHUB_OUTPUT
-          echo "new_prs=$NEW_PRS" >> $GITHUB_OUTPUT
-          echo "updated_prs=$UPDATED_PRS" >> $GITHUB_OUTPUT
-          echo "total_merged=$TOTAL_MERGED" >> $GITHUB_OUTPUT
-          
-          echo "Found $TOTAL_ACTIVE active PRs: $NEW_PRS newly created, $UPDATED_PRS recently updated"
-          echo "Found $TOTAL_MERGED merged PRs"
-          
-          echo "Analysis complete for $SEARCH_DATE"
-      
-      - name: Create workflow summary
-        run: |
+          # Create summary
           echo "# Windows PR Activity Report" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "**Date:** ${{ steps.time.outputs.start_date }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Repository:** $REPO" >> $GITHUB_STEP_SUMMARY
+          echo "**Date:** $START_DATE" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "## 📊 Summary" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "| Metric | Count |" >> $GITHUB_STEP_SUMMARY
           echo "|--------|-------|" >> $GITHUB_STEP_SUMMARY
-          echo "| Total PRs | ${{ steps.analyze.outputs.total_prs }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| Active PRs | ${{ steps.analyze.outputs.total_active }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| - New | ${{ steps.analyze.outputs.new_prs }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| - Updated | ${{ steps.analyze.outputs.updated_prs }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| Merged PRs | ${{ steps.analyze.outputs.total_merged }} |" >> $GITHUB_STEP_SUMMARY
-
+          echo "| Total PRs (Open + Merged) | $TOTAL_PRS |" >> $GITHUB_STEP_SUMMARY
+          echo "| Open PRs | $TOTAL_OPEN |" >> $GITHUB_STEP_SUMMARY
+          echo "| Merged PRs | $TOTAL_MERGED |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Windows PRs** | **$WINDOWS_TOTAL** |" >> $GITHUB_STEP_SUMMARY
+          echo "| - Windows Open | $WINDOWS_OPEN |" >> $GITHUB_STEP_SUMMARY
+          echo "| - Windows Merged | $WINDOWS_MERGED |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          # Show some example Windows PRs
+          echo "## 🪟 Windows PRs Found" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          if [ "$WINDOWS_TOTAL" -gt 0 ]; then
+            echo "### Open Windows PRs:" >> $GITHUB_STEP_SUMMARY
+            jq -r '.items[] | select(.title | ascii_downcase | test("windows|win32|msvc|mingw|\\.bat")) | "- [#\(.number)](\(.html_url)) \(.title)"' open_prs.json | head -10 >> $GITHUB_STEP_SUMMARY || true
+            echo "" >> $GITHUB_STEP_SUMMARY
+            
+            echo "### Merged Windows PRs:" >> $GITHUB_STEP_SUMMARY
+            jq -r '.items[] | select(.title | ascii_downcase | test("windows|win32|msvc|mingw|\\.bat")) | "- [#\(.number)](\(.html_url)) \(.title)"' merged_prs.json | head -10 >> $GITHUB_STEP_SUMMARY || true
+          else
+            echo "*No Windows-related PRs found for this date.*" >> $GITHUB_STEP_SUMMARY
+          fi
+          
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "---" >> $GITHUB_STEP_SUMMARY
+          echo "*Note: Windows PRs identified by title keywords: windows, win32, msvc, mingw, .bat*" >> $GITHUB_STEP_SUMMARY
