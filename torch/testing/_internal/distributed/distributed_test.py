@@ -84,9 +84,11 @@ from torch.testing._internal.common_utils import (
     IS_MACOS,
     IS_SANDCASTLE,
     IS_WINDOWS,
+    MI200_ARCH,
+    parametrize,
     skip_but_pass_in_sandcastle,
     skip_but_pass_in_sandcastle_if,
-    skipIfRocm,
+    skipIfRocmArch,
 )
 from torch.utils._python_dispatch import TorchDispatchMode
 from torch.utils.data.distributed import DistributedSampler
@@ -4785,12 +4787,15 @@ class DistributedTest:
             optim_cls,
             optim_kwargs,
             init_before,
+            hardcoded_cpu_seed=False,
+            hardcoded_gpu_seed=False,
             gradient_as_bucket_view=True,
         ):
             # Need to seed to ensure inputs are unique across rank. Otherwise,
             # allreduce won't have any effect.
-            torch.manual_seed(self.rank)
-            torch.cuda.manual_seed(self.rank)
+            my_seed = 123
+            torch.manual_seed(my_seed if hardcoded_cpu_seed else self.rank)
+            torch.cuda.manual_seed(my_seed if hardcoded_gpu_seed else self.rank)
             torch.cuda.set_device(self.rank)
 
             # Test a simple linear as well as a ResNet model.
@@ -4798,10 +4803,13 @@ class DistributedTest:
                 nn.Sequential(nn.Linear(3, 3), nn.Linear(3, 3), nn.Linear(3, 3)).cuda()
             ]
             if HAS_TORCHVISION:
+                print("DEBUG LOG has torchvision")
                 models_to_test.append(torchvision.models.resnet50().cuda())
 
             for j, model in enumerate(models_to_test):
+                print("DEBUG LOG iteration ", j)
                 model_optim_in_bwd = copy.deepcopy(model)
+
                 model = nn.parallel.DistributedDataParallel(
                     model,
                     device_ids=[self.rank],
@@ -4850,6 +4858,8 @@ class DistributedTest:
                             model_optim_in_bwd.parameters(),
                             strict=True,
                         ):
+                            print("DEBUG LOG p1: ", p1)
+                            print("DEBUG LOG p2: ", p2)
                             self.assertEqual(
                                 p1, p2, f"Params not equal at iteration {i}"
                             )
@@ -4862,20 +4872,70 @@ class DistributedTest:
                         # case.
                         optim.zero_grad(set_to_none=True)
 
-        @skipIfRocm
         @skip_if_lt_x_gpu(2)
-        def test_ddp_apply_optim_in_backward(self):
-            for optim_cls, init_before in itertools.product(
-                [torch.optim.SGD, torch.optim.Adam], [True, False]
-            ):
-                with self.subTest(optim_cls=optim_cls):
-                    self._test_ddp_apply_optim_in_backward(
-                        optim_cls=optim_cls,
-                        optim_kwargs={"lr": 0.03},
-                        init_before=init_before,
-                    )
+        @parametrize("hardcoded_cpu_seed", [True, False])
+        @parametrize("hardcoded_gpu_seed", [True, False])
+        def test_ddp_apply_optim_in_backward_SGD_init_before(
+            self, hardcoded_cpu_seed, hardcoded_gpu_seed
+        ):
+            optim_cls = torch.optim.SGD
+            with self.subTest(optim_cls=optim_cls):
+                self._test_ddp_apply_optim_in_backward(
+                    optim_cls=optim_cls,
+                    optim_kwargs={"lr": 0.03},
+                    init_before=True,
+                    hardcoded_cpu_seed=hardcoded_cpu_seed,
+                    hardcoded_gpu_seed=hardcoded_gpu_seed,
+                )
 
-        @skipIfRocm
+        @skip_if_lt_x_gpu(2)
+        @parametrize("hardcoded_cpu_seed", [True, False])
+        @parametrize("hardcoded_gpu_seed", [True, False])
+        def test_ddp_apply_optim_in_backward_SGD_no_init_before(
+            self, hardcoded_cpu_seed, hardcoded_gpu_seed
+        ):
+            optim_cls = torch.optim.SGD
+            with self.subTest(optim_cls=optim_cls):
+                self._test_ddp_apply_optim_in_backward(
+                    optim_cls=optim_cls,
+                    optim_kwargs={"lr": 0.03},
+                    init_before=False,
+                    hardcoded_cpu_seed=hardcoded_cpu_seed,
+                    hardcoded_gpu_seed=hardcoded_gpu_seed,
+                )
+
+        @skip_if_lt_x_gpu(2)
+        @parametrize("hardcoded_cpu_seed", [True, False])
+        @parametrize("hardcoded_gpu_seed", [True, False])
+        def test_ddp_apply_optim_in_backward_Adam_init_before(
+            self, hardcoded_cpu_seed, hardcoded_gpu_seed
+        ):
+            optim_cls = torch.optim.Adam
+            with self.subTest(optim_cls=optim_cls):
+                self._test_ddp_apply_optim_in_backward(
+                    optim_cls=optim_cls,
+                    optim_kwargs={"lr": 0.03},
+                    init_before=True,
+                    hardcoded_cpu_seed=hardcoded_cpu_seed,
+                    hardcoded_gpu_seed=hardcoded_gpu_seed,
+                )
+
+        @skip_if_lt_x_gpu(2)
+        @parametrize("hardcoded_cpu_seed", [True, False])
+        @parametrize("hardcoded_gpu_seed", [True, False])
+        def test_ddp_apply_optim_in_backward_Adam_no_init_before(
+            self, hardcoded_cpu_seed, hardcoded_gpu_seed
+        ):
+            optim_cls = torch.optim.Adam
+            with self.subTest(optim_cls=optim_cls):
+                self._test_ddp_apply_optim_in_backward(
+                    optim_cls=optim_cls,
+                    optim_kwargs={"lr": 0.03},
+                    init_before=False,
+                    hardcoded_cpu_seed=hardcoded_cpu_seed,
+                    hardcoded_gpu_seed=hardcoded_gpu_seed,
+                )
+
         @skip_if_lt_x_gpu(2)
         def test_ddp_apply_optim_in_backward_grad_as_bucket_view_false(self):
             for init_before in [True, False]:
@@ -4886,7 +4946,7 @@ class DistributedTest:
                     gradient_as_bucket_view=False,
                 )
 
-        @skipIfRocm
+        @skipIfRocmArch(MI200_ARCH)
         @skip_if_lt_x_gpu(2)
         def test_ddp_apply_optim_in_backward_ignored_params(self):
             torch.cuda.set_device(self.rank)

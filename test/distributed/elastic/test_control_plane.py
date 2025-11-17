@@ -15,7 +15,13 @@ from torch.distributed.elastic.control_plane import (
     TORCH_WORKER_SERVER_SOCKET,
     worker_main,
 )
-from torch.testing._internal.common_utils import requires_cuda, run_tests, TestCase
+from torch.testing._internal.common_utils import (
+    MI200_ARCH,
+    requires_cuda,
+    run_tests,
+    skipIfRocmArch,
+    TestCase,
+)
 
 
 class UnixHTTPConnection(HTTPConnection):
@@ -152,6 +158,7 @@ class WorkerServerTest(TestCase):
             )
             self.assertEqual(resp.status, 200)
 
+    @skipIfRocmArch(MI200_ARCH)
     def test_tcp(self) -> None:
         import requests
 
