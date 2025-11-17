@@ -1165,6 +1165,7 @@ class CachingAutotuner(KernelInterface):
             params["threads_per_warp"] = getattr(
                 launcher.bin.metadata, "threads_per_warp", 32
             )
+            params["build_flags"] = getattr(launcher.bin.metadata, "build_flags", "")
 
         from torch._inductor import config
         from torch._inductor.codecache import CudaKernelParamCache
