@@ -714,6 +714,10 @@ class TestFP8Matmul(TestCase):
         with self.assertRaises(AssertionError if torch.version.hip or device == "cpu" else RuntimeError):
             self._test_tautological_mm(device, out_dtype=e5m2_type)
 
+    @unittest.skipIf(
+        _get_torch_cuda_version() >= (13, 0),
+        "Skip on CUDA 13.0+ due to known issues with FP8"
+    )
     def test_float8_scale(self, device) -> None:
         if device != "cpu" and torch.cuda.is_available() and not PLATFORM_SUPPORTS_FP8:
             raise unittest.SkipTest(f8_msg)
