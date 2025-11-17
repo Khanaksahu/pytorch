@@ -20,6 +20,80 @@ log = logging.getLogger(__name__)
 patterns = PatternMatcherPass(subsystem="joint_graph_passes")
 aten = torch.ops.aten
 
+from torch.library import custom_op
+from torch._inductor.lowering import make_fallback
+
+def _shape_to_offset(size, device: torch.device) -> int:
+    nelem = 1
+    for s in size:
+        nelem *= int(s)
+    # Normalize device
+    if device is None:
+        device = torch.device("cpu")
+    elif not isinstance(device, torch.device):
+        device = torch.device(device)
+    # CPU or non-CUDA builds: skip alignment, no CUDA queries
+    if device.type != "cuda":
+        return 0
+
+    UNROLL = 4
+    prop = torch.cuda.get_device_properties(device)
+
+    threads_per_round = (
+        prop.multi_processor_count * prop.max_threads_per_multi_processor
+    )
+    rounds_per_thread = (nelem + threads_per_round * UNROLL - 1) // (
+        threads_per_round * UNROLL
+    )
+    used_offset = rounds_per_thread * UNROLL
+    return used_offset
+
+
+def _reserve_state(device: torch.device, used_offset: int) -> tuple[int, int]:
+    if device.type == "cuda":
+        dev_index = device.index if isinstance(device, torch.device) else int(device)
+        gen = torch.cuda.default_generators[dev_index]
+        seed = int(gen.initial_seed())
+        old_off = int(gen.get_offset())
+        gen.set_offset(old_off + used_offset)
+        base = old_off // 4
+        return seed, base
+    return 0, 0   # _reserve_state is only valid for CUDA devices
+
+
+@custom_op("custom_op::rand_eager_offset", mutates_args={})
+def rand_eager_offset(offset: int, device: torch.device) -> torch.Tensor:
+    seed, base = _reserve_state(device, int(offset))
+    out = torch.empty(2, dtype=torch.int64, device=device)  # [seed, base]
+    out[0] = seed
+    out[1] = base
+    return out
+
+
+@custom_op("custom_op::rand_eager_offsets", mutates_args={})
+def rand_eager_offsets(offsets: list[int], device: torch.device) -> torch.Tensor:
+    states = [ _reserve_state(device, int(off)) for off in offsets ]  # list[(seed, base)]
+    cpu = torch.tensor(states, dtype=torch.int64).pin_memory()        # shape [N, 2]
+    out = torch.empty_like(cpu, device=device)
+    out.copy_(cpu, non_blocking=True)
+    return out
+
+
+@rand_eager_offset.register_fake
+def _(offset: int, device: torch.device):
+    return torch.empty((2,), dtype=torch.int64, device=device)
+
+
+@rand_eager_offsets.register_fake
+def _(offsets: list[int], device: torch.device):
+    return torch.empty((len(offsets), 2), dtype=torch.int64, device=device)
+
+
+rand_eager_offset_op = torch.ops.custom_op.rand_eager_offset.default
+rand_eager_offsets_op = torch.ops.custom_op.rand_eager_offsets.default
+make_fallback(rand_eager_offset_op)
+make_fallback(rand_eager_offsets_op)
+
 
 def replace_random_passes(gm: torch.fx.GraphModule):
     """Modify the given FX graph to use backend-native random ops"""
@@ -29,8 +103,57 @@ def replace_random_passes(gm: torch.fx.GraphModule):
     count = patterns.apply(gm)
     with GraphTransformObserver(gm, "fuse_seed_creation_pass", "joint_graph_passes"):
         count += fuse_seed_creation_pass(gm.graph)
+    if config.align_random_eager:
+        with GraphTransformObserver(gm, "fuse_offset_creation_pass"):
+            count += fuse_offset_creation_pass(gm.graph)
 
     return count
+
+
+def fuse_offset_creation_pass(graph: torch.fx.Graph):
+    """
+    Horizontally fuse all the RNG state creation on each device
+        s0 = custom_op.rand_eager_offset(offset0, dev)   # shape [2]
+        s1 = custom_op.rand_eager_offset(offset1, dev)   # shape [2]
+    Becomes:
+        states = custom_op.rand_eager_offsets([offset0, offset1, ...], dev)  # shape [N, 2]
+        s0 = states[0]
+        s1 = states[1]
+    We do this because RNG state creation is entirely launch-overhead bound.
+    """
+    device_offsets = collections.defaultdict(list)
+    for node in graph.nodes:
+        if CallFunctionVarArgs(torch.ops.custom_op.rand_eager_offset).match(node):
+            device_offsets[node.args[1]].append(node)  # args: (offset, device)
+
+    if not device_offsets:
+        return 0
+
+    for device, offsets in device_offsets.items():
+        with graph.inserting_before(offsets[0]):
+            offs = [n.args[0] for n in offsets]
+            combined = graph.call_function(
+                torch.ops.custom_op.rand_eager_offsets.default, (offs, device)
+            )
+            with V.fake_mode:
+                combined.meta["val"] = torch.empty(
+                    [len(offsets), 2], device=device, dtype=torch.int64
+                )
+                combined.meta["tensor_meta"] = _extract_tensor_metadata(
+                    combined.meta["val"]
+                )
+
+        for idx, offset in enumerate(offsets):
+            with graph.inserting_before(offset):
+                new_state = graph.call_function(
+                    torch.ops.aten.select.int,  # dim=0, index=idx
+                    (combined, 0, idx),
+                )
+            offset.replace_all_uses_with(new_state)
+            new_state.meta.update(offset.meta)
+            graph.erase_node(offset)
+
+    return len(device_offsets)
 
 
 def fuse_seed_creation_pass(graph: torch.fx.Graph):
@@ -124,6 +247,34 @@ def replace_random(
         match.output_node().target.overloadpacket  # type: ignore[union-attr]
     ]  # type: ignore[union-attr]
     device = get_device(device)
+
+    if mode == "rand" and config.align_random_eager and device.type == "cuda":
+
+        def replacement(size):
+            offset = _shape_to_offset(size, device)
+
+            align_dtype = dtype
+            if isinstance(align_dtype, (tuple, list)):
+                align_dtype = align_dtype[0] if len(align_dtype) else None
+            if align_dtype is None:
+                align_dtype = torch.float32
+
+            result = inductor_prims.random(
+                size,
+                torch.ops.custom_op.rand_eager_offset(offset, device),
+                mode,
+                **default_kwargs(device),
+                align_dtype=align_dtype,
+            )
+            if dtype is not None:
+                result = result.to(dtype)
+            return result
+
+        match.replace_by_example(replacement, [size])
+        return
+
+    # Fallback (e.g., randn) keeps existing inductor behavior
+
     # pyrefly: ignore [bad-argument-type]
     match.replace_by_example(replacement, [size])
 
